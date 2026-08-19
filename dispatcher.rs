@@ -255,7 +255,8 @@ impl Dispatcher {
                 let io_task = spawn_critical("TUN dispatcher", task_cancel, async move {
                     let mut return_rx = return_rx;
                     loop {
-                        let result = tun::receive_fd(name.clone(), io_dispatcher.cancel.clone()).await;
+                        let result =
+                            tun::receive_fd(name.clone(), io_dispatcher.cancel.clone()).await;
                         let file = match result {
                             Ok(file) => file,
                             Err(_) if io_dispatcher.cancel.is_cancelled() => return,
@@ -436,13 +437,17 @@ impl Dispatcher {
         let stats_clone = stats.clone();
         let device_clone = device.clone();
         let mut read_handle = tokio::spawn(async move {
-            self_clone.read_tun_unix_async(device_clone, pool_clone, stats_clone).await;
+            self_clone
+                .read_tun_unix_async(device_clone, pool_clone, stats_clone)
+                .await;
         });
 
         let self_clone = self.clone();
         let stats_clone = stats.clone();
         let mut write_handle = tokio::spawn(async move {
-            self_clone.write_tun_unix_async(device, receiver, stats_clone).await;
+            self_clone
+                .write_tun_unix_async(device, receiver, stats_clone)
+                .await;
         });
 
         tokio::select! {
@@ -626,13 +631,17 @@ impl Dispatcher {
         let stats_clone = stats.clone();
         let device_clone = device.clone();
         let mut read_handle = tokio::spawn(async move {
-            self_clone.read_tun_windows_blocking(device_clone, pool_clone, stats_clone).await;
+            self_clone
+                .read_tun_windows_blocking(device_clone, pool_clone, stats_clone)
+                .await;
         });
 
         let self_clone = self.clone();
         let stats_clone = stats.clone();
         let mut write_handle = tokio::spawn(async move {
-            self_clone.write_tun_windows_blocking(device, receiver, stats_clone).await;
+            self_clone
+                .write_tun_windows_blocking(device, receiver, stats_clone)
+                .await;
         });
 
         tokio::select! {
@@ -672,7 +681,8 @@ impl Dispatcher {
                     return Ok(Vec::new());
                 }
                 Ok(buf[..n].to_vec())
-            }).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(data)) if data.is_empty() => {
@@ -735,7 +745,8 @@ impl Dispatcher {
                 let mut device = device_clone.blocking_lock();
                 device.write_all(&data)?;
                 Ok(())
-            }).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(())) => {
@@ -781,13 +792,17 @@ impl Dispatcher {
         let stats_clone = stats.clone();
         let device_clone = device.clone();
         let mut read_handle = tokio::spawn(async move {
-            self_clone.read_tun_unix_async(device_clone, pool_clone, stats_clone).await;
+            self_clone
+                .read_tun_unix_async(device_clone, pool_clone, stats_clone)
+                .await;
         });
 
         let self_clone = self.clone();
         let stats_clone = stats.clone();
         let mut write_handle = tokio::spawn(async move {
-            self_clone.write_tun_unix_async(device, receiver, stats_clone).await;
+            self_clone
+                .write_tun_unix_async(device, receiver, stats_clone)
+                .await;
         });
 
         tokio::select! {

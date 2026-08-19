@@ -425,11 +425,7 @@ pub async fn run_session(
         let _ = tokio::time::timeout(DEALLOCATE_TIMEOUT, allocation.deallocate()).await;
         return Err(error.context("TURN ChannelBind РѕР±СЏР·Р°С‚РµР»РµРЅ"));
     }
-    let session = tokio::spawn(run_allocated_session(
-        config,
-        runtime,
-        allocation.clone(),
-    ));
+    let session = tokio::spawn(run_allocated_session(config, runtime, allocation.clone()));
     let result = await_session_task(&cancel, session).await;
     let _ = tokio::time::timeout(DEALLOCATE_TIMEOUT, allocation.deallocate()).await;
     result
