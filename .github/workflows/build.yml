@@ -13,7 +13,7 @@ env:
   PROJECT_VERSION: ${{ github.ref_name }}
 
 jobs:
-  # ========== ПРОВЕРКА КОДА (только clippy и tests) ==========
+  # ========== ПРОВЕРКА КОДА ==========
   check:
     name: Check & Test
     runs-on: ubuntu-latest
@@ -43,7 +43,7 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-        continue-on-error: true  # Не падаем, если есть предупреждения
+        continue-on-error: true
 
       - name: Run tests
         run: cargo test --quiet
@@ -221,6 +221,9 @@ jobs:
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_NDK_HOME" >> $GITHUB_PATH
 
+      - name: Install Android Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Cache Cargo (Android)
         uses: actions/cache@v4
         with:
@@ -239,8 +242,7 @@ jobs:
           cargo ndk \
             --target ${{ matrix.target }} \
             --platform 33 \
-            --build-mode release \
-            --output-path target/${{ matrix.target }}/release
+            build --release
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
@@ -249,12 +251,17 @@ jobs:
       - name: Prepare Android .so files
         run: |
           mkdir -p ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}
-          if [ -f "target/${{ matrix.target }}/release/libclient.so" ]; then
-            cp target/${{ matrix.target }}/release/libclient.so \
-               ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}/
-          elif [ -f "target/${{ matrix.target }}/release/client" ]; then
-            cp target/${{ matrix.target }}/release/client \
-               ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}/libclient.so
+          
+          # Ищем .so файл в стандартных местах
+          SO_FILE=$(find target/${{ matrix.target }}/release -name "*.so" -type f | head -n 1)
+          
+          if [ -n "$SO_FILE" ]; then
+            cp "$SO_FILE" ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}/libclient.so
+            echo "✅ Copied $SO_FILE"
+          else
+            echo "⚠️ No .so file found in target/${{ matrix.target }}/release/"
+            echo "📁 Directory contents:"
+            ls -la target/${{ matrix.target }}/release/ || true
           fi
 
       - name: Upload Android artifacts
