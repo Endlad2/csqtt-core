@@ -440,7 +440,6 @@ impl Dispatcher {
                 .unwrap_or_else(|e| crate::log_error!("[ОШИБКА] Чтение TUN: {e}"));
         });
 
-        // Вместо std::mem::take используем опцию для передачи владения
         let receiver = std::mem::replace(receiver, PacketReceiver {
             shared: receiver.shared.clone(),
         });
@@ -538,7 +537,6 @@ impl Dispatcher {
                 Err(_) => {
                     tokio::task::yield_now().await;
                 }
-                _ => {} // exhaustiveness
             }
         }
     }
@@ -612,7 +610,6 @@ impl Dispatcher {
                 Err(_) => {
                     tokio::task::yield_now().await;
                 }
-                _ => {} // exhaustiveness
             }
         }
     }
