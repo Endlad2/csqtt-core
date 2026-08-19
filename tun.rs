@@ -101,9 +101,9 @@ fn receive_fd_blocking(name: &str, cancel: &CancellationToken) -> Result<File> {
 
 #[cfg(windows)]
 pub async fn receive_fd(name: String, cancel: CancellationToken) -> Result<File> {
-    use std::os::windows::io::FromRawHandle;
-    use tokio::io::AsyncReadExt;
     use tokio::net::windows::named_pipe::ClientOptions;
+    use tokio::io::AsyncReadExt;
+    use std::os::windows::io::FromRawHandle;
 
     let pipe_name = format!(r"\\.\pipe\{}", name);
     let mut pipe = ClientOptions::new()
@@ -129,7 +129,9 @@ pub async fn create_tun_device(name: &str) -> Result<::tun::Device> {
     use ::tun::Configuration;
 
     let mut config = Configuration::default();
-    config.tun_name(name).up();
+    config
+        .tun_name(name)
+        .up();
 
     let device = ::tun::create(&config)
         .map_err(|e| anyhow::anyhow!("Failed to create TUN device on Windows: {}", e))?;
@@ -149,21 +151,13 @@ pub fn configure_windows_tun(adapter_name: &str, ip: &str, dns: &str, gateway: &
         gateway.to_owned()
     };
 
-    crate::log_error!(
-        "[КЛИЕНТ] Настройка TUN: IP={ip}, DNS={dns}, Gateway={gateway} на {adapter_name}"
-    );
+    crate::log_error!("[КЛИЕНТ] Настройка TUN: IP={ip}, DNS={dns}, Gateway={gateway} на {adapter_name}");
 
     let status = std::process::Command::new("netsh")
         .args([
-            "interface",
-            "ip",
-            "set",
-            "address",
+            "interface", "ip", "set", "address",
             &format!("name={adapter_name}"),
-            "static",
-            ip,
-            "255.255.255.0",
-            &gateway,
+            "static", ip, "255.255.255.0", &gateway,
         ])
         .status()
         .map_err(|e| anyhow::anyhow!("Не удалось запустить netsh: {e}"))?;
@@ -177,21 +171,15 @@ pub fn configure_windows_tun(adapter_name: &str, ip: &str, dns: &str, gateway: &
         let primary_dns = dns.split(',').next().unwrap_or("1.1.1.1");
         let status = std::process::Command::new("netsh")
             .args([
-                "interface",
-                "ip",
-                "set",
-                "dns",
+                "interface", "ip", "set", "dns",
                 &format!("name={adapter_name}"),
-                "static",
-                primary_dns,
+                "static", primary_dns,
             ])
             .status()
             .map_err(|e| anyhow::anyhow!("Не удалось запустить netsh для DNS: {e}"))?;
 
         if !status.success() {
-            crate::log_error!(
-                "[КЛИЕНТ] Предупреждение: netsh не смог установить DNS {primary_dns}"
-            );
+            crate::log_error!("[КЛИЕНТ] Предупреждение: netsh не смог установить DNS {primary_dns}");
         } else {
             crate::log_error!("[КЛИЕНТ] DNS {primary_dns} установлен на {adapter_name}");
         }
@@ -206,7 +194,9 @@ pub async fn create_tun_device(name: &str) -> Result<File> {
     use std::os::fd::FromFd;
 
     let mut config = Configuration::default();
-    config.tun_name(name).up();
+    config
+        .tun_name(name)
+        .up();
 
     let device = ::tun::create(&config)
         .map_err(|e| anyhow::anyhow!("Failed to create TUN device on macOS: {}", e))?;

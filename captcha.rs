@@ -831,10 +831,7 @@ fn parse_page(html: &str) -> Result<CaptchaPage> {
         .and_then(|captures| captures[1].parse().ok())
         .unwrap_or_default();
     if pow_input.is_empty() {
-        if let Some(captures) = POW_OBFUSCATED
-            .as_ref()
-            .and_then(|regex| regex.captures(html))
-        {
+        if let Some(captures) = POW_OBFUSCATED.as_ref().and_then(|regex| regex.captures(html)) {
             pow_input = captures[1].to_owned();
             pow_difficulty = captures[2].parse().unwrap_or(4);
         }
