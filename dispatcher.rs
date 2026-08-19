@@ -1029,4 +1029,597 @@ mod tests {
     }
 
     fn test_dispatcher() -> (Arc<Dispatcher>, PacketReceiver) {
-        let (return_tx, return_rx)
+        let (return_tx, return_rx) = packet_channel(64, RETURN_MAX_AGE, true);
+        (
+            Arc::new(Dispatcher {
+                workers: ArcSwap::from_pointee(Vec::new()),
+                return_tx,
+                scheduler: StripedScheduler::new(),
+                cancel: CancellationToken::new(),
+                tasks: tokio::sync::Mutex::new(Vec::new()),
+                tun_config: tokio::sync::Mutex::new(None),
+            }),
+            return_rx,
+        )
+    }
+
+    fn channels(
+        id: usize,
+        capacity: usize,
+    ) -> (
+        WorkerChannels,
+        PacketReceiver,
+        PacketReceiver,
+        PacketReceiver,
+        PacketReceiver,
+    ) {
+        let (normal, normal_rx) = packet_channel(capacity, RETURN_MAX_AGE, true);
+        let (small, small_rx) = packet_channel(capacity, RETURN_MAX_AGE, true);
+        let (bulk, bulk_rx) = packet_channel(capacity, RETURN_MAX_AGE, true);
+        let (doomsday, doomsday_rx) = packet_channel(capacity, RETURN_MAX_AGE, true);
+        (
+            WorkerChannels {
+                id,
+                incarnation_id: id as u64 + 1,
+                normal,
+                small,
+                bulk,
+                doomsday,
+            },
+            normal_rx,
+            small_rx,
+            bulk_rx,
+            doomsday_rx,
+        )
+    }
+
+    fn queue_trace_outcome(actions: &[(u8, u8)], replace_oldest: bool) -> (bool, QueueCoverage) {
+        let capacity = 7;
+        let pool = PacketPool::new(32);
+        let (sender, receiver) = packet_channel(capacity, Duration::from_secs(3_600), true);
+        let mut model = VecDeque::new();
+        let mut active = true;
+        let mut coverage = QueueCoverage::default();
+        for &(operation, value) in actions {
+            match operation % 6 {
+                0 => {
+                    let mut packet = pool.acquire();
+                    packet.set_read_len(1).unwrap();
+                    packet.as_mut_slice()[0] = value;
+                    let accepted = sender.try_send(packet).is_ok();
+                    let expected = active && model.len() < capacity;
+                    if accepted != expected {
+                        return (false, coverage);
+                    }
+                    if expected {
+                        model.push_back(value);
+                    } else if active {
+                        coverage.full_rejection += 1;
+                    } else {
+                        coverage.inactive_rejection += 1;
+                    }
+                }
+                1 => {
+                    let mut packet = pool.acquire();
+                    packet.set_read_len(1).unwrap();
+                    packet.as_mut_slice()[0] = value;
+                    let accepted = sender.force_send(packet).is_ok();
+                    if accepted != active {
+                        return (false, coverage);
+                    }
+                    if active {
+                        if model.len() == capacity {
+                            coverage.forced_replacement += 1;
+                            if replace_oldest {
+                                model.pop_front();
+                            } else {
+                                model.pop_back();
+                            }
+                        }
+                        model.push_back(value);
+                    } else {
+                        coverage.inactive_rejection += 1;
+                    }
+                }
+                2 => {
+                    let actual = receiver.try_recv().map(|packet| packet.as_slice()[0]);
+                    if actual != model.pop_front() {
+                        return (false, coverage);
+                    }
+                }
+                3 => {
+                    receiver.suspend();
+                    active = false;
+                    model.clear();
+                    coverage.suspended += 1;
+                }
+                4 => {
+                    receiver.resume();
+                    active = true;
+                    model.clear();
+                    coverage.resumed += 1;
+                }
+                _ => {
+                    receiver.purge();
+                    model.clear();
+                    coverage.purged += 1;
+                }
+            }
+        }
+        while let Some(expected) = model.pop_front() {
+            if receiver.try_recv().map(|packet| packet.as_slice()[0]) != Some(expected) {
+                return (false, coverage);
+            }
+        }
+        (
+            receiver.try_recv().is_none() && pool.available() == pool.capacity(),
+            coverage,
+        )
+    }
+
+    fn queue_trace_matches(actions: &[(u8, u8)], replace_oldest: bool) -> bool {
+        queue_trace_outcome(actions, replace_oldest).0
+    }
+
+    fn mix64(mut value: u64) -> u64 {
+        value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn deterministic_queue_actions(seed: u64, length: usize) -> Vec<(u8, u8)> {
+        let mut state = seed;
+        let mut actions = Vec::with_capacity(length);
+        let prefix = [
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (0, 7),
+            (0, 8),
+            (1, 9),
+            (3, 0),
+            (0, 10),
+            (4, 0),
+            (1, 11),
+            (5, 0),
+        ];
+        actions.extend(prefix.into_iter().take(length));
+        for _ in actions.len()..length {
+            state = mix64(state);
+            actions.push(((state % 6) as u8, (state >> 24) as u8));
+        }
+        actions
+    }
+
+    fn tcp_packet(pool: &Arc<PacketPool>, source_port: u16, sequence: u32) -> PacketBuf {
+        tcp_packet_len(pool, source_port, sequence, 1_200)
+    }
+
+    fn tcp_packet_len(
+        pool: &Arc<PacketPool>,
+        source_port: u16,
+        sequence: u32,
+        len: usize,
+    ) -> PacketBuf {
+        assert!(len >= 40);
+        let mut packet = pool.acquire();
+        packet.set_read_len(len).unwrap();
+        let bytes = packet.as_mut_slice();
+        bytes.fill(0);
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 6;
+        bytes[12..16].copy_from_slice(&[10, 66, 67, 2]);
+        bytes[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+        bytes[24..28].copy_from_slice(&sequence.to_be_bytes());
+        bytes[32] = 5 << 4;
+        bytes[33] = 0x18;
+        packet
+    }
+
+    fn packet_sequence(packet: &PacketBuf) -> u32 {
+        u32::from_be_bytes(packet.as_slice()[24..28].try_into().unwrap_or_default())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_downlink_preserves_late_tcp_retransmit() {
+        let (dispatcher, return_rx) = test_dispatcher();
+        let pool = PacketPool::new(4);
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 0));
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 2_320));
+        assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 0);
+        assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 2_320);
+        tokio::time::advance(Duration::from_millis(81)).await;
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 1_160));
+        assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 1_160);
+        assert_eq!(pool.available(), pool.capacity());
+    }
+
+    #[test]
+    #[ignore]
+    fn tcp_bulk_fallback_can_use_every_active_worker() {
+        let (dispatcher, _return_rx) = test_dispatcher();
+        let pool = PacketPool::new(384);
+        let mut workers = Vec::new();
+        let mut receivers = Vec::new();
+        for id in 0..162 {
+            let (worker, normal, _small, bulk, _doomsday) = channels(id, 1);
+            workers.push(worker);
+            receivers.push((normal, bulk));
+        }
+        dispatcher.workers.store(Arc::new(workers));
+        let probe = tcp_packet(&pool, 51_000, 7);
+        let ticket = dispatcher.scheduler.begin(162, probe.as_slice()).unwrap();
+        drop(probe);
+        assert_eq!(ticket.cohort_len, 162, "cohort must cover all workers");
+        for _ in 0..324 {
+            dispatcher.dispatch(tcp_packet(&pool, 51_000, 7));
+        }
+        let total_queued: usize = receivers
+            .iter()
+            .map(|(normal, bulk)| bulk.len() + normal.len())
+            .sum();
+        assert!(total_queued > 0, "nothing queued");
+    }
+
+    #[test]
+    fn unregister_and_recover_one_worker_never_changes_its_siblings() {
+        let (dispatcher, _return_rx) = test_dispatcher();
+        for id in 0..9 {
+            dispatcher.register(channels(id, 1).0);
+        }
+        for cycle in 0..10_000 {
+            let id = cycle % 9;
+            dispatcher.unregister(id, id as u64 + 1);
+            assert_eq!(dispatcher.active_count(), 8);
+            for sibling in 0..9 {
+                assert_eq!(dispatcher.worker(sibling).is_some(), sibling != id);
+            }
+            dispatcher.register(channels(id, 1).0);
+            assert_eq!(dispatcher.active_count(), 9);
+        }
+    }
+
+    #[test]
+    fn stale_registration_drop_cannot_unregister_replacement() {
+        let (dispatcher, _return_rx) = test_dispatcher();
+        let mut old = channels(4, 1).0;
+        old.incarnation_id = 40;
+        dispatcher.register(old);
+        let mut replacement = channels(4, 1).0;
+        replacement.incarnation_id = 41;
+        dispatcher.register(replacement);
+
+        dispatcher.unregister(4, 40);
+
+        assert_eq!(dispatcher.active_count(), 1);
+        assert_eq!(dispatcher.worker(4).unwrap().incarnation_id, 41);
+    }
+
+    #[test]
+    fn overload_keeps_queues_and_packet_memory_strictly_bounded() {
+        let (dispatcher, _return_rx) = test_dispatcher();
+        let pool = PacketPool::new(64);
+        let mut workers = Vec::new();
+        let mut receivers = Vec::new();
+        for id in 0..9 {
+            let (worker, normal, small, bulk, _doomsday) = channels(id, 1);
+            workers.push(worker);
+            receivers.push((normal, small, bulk));
+        }
+        dispatcher.workers.store(Arc::new(workers));
+        for sequence in 0..100_000 {
+            let mut packet = pool.try_acquire().unwrap();
+            packet
+                .set_read_len(if sequence % 2 == 0 { 100 } else { 1_000 })
+                .unwrap();
+            dispatcher.dispatch(packet);
+        }
+        let mut queued = 0;
+        for (normal, small, bulk) in &receivers {
+            queued += normal.len() + small.len() + bulk.len();
+        }
+        assert!(queued <= 27);
+        assert!(queued > 0);
+        assert_eq!(pool.available() + queued, pool.capacity());
+        for (normal, small, bulk) in &receivers {
+            while normal.try_recv().is_some() {}
+            while small.try_recv().is_some() {}
+            while bulk.try_recv().is_some() {}
+        }
+        assert_eq!(pool.available(), pool.capacity());
+    }
+
+    #[test]
+    fn saturated_queue_replaces_oldest_with_newest() {
+        let pool = PacketPool::new(4);
+        let (sender, receiver) = packet_channel(2, Duration::from_secs(1), true);
+        for value in 1..=3 {
+            let mut packet = pool.acquire();
+            packet.set_read_len(1).unwrap();
+            packet.as_mut_slice()[0] = value;
+            assert!(sender.force_send(packet).is_ok());
+        }
+        assert_eq!(receiver.try_recv().unwrap().as_slice(), [2]);
+        assert_eq!(receiver.try_recv().unwrap().as_slice(), [3]);
+        assert!(receiver.try_recv().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_packets_are_released_instead_of_replayed() {
+        let pool = PacketPool::new(2);
+        let (sender, receiver) = packet_channel(2, Duration::from_millis(100), true);
+        assert!(sender.force_send(pool.acquire()).is_ok());
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert!(receiver.try_recv().is_none());
+        assert_eq!(pool.available(), pool.capacity());
+    }
+
+    #[test]
+    fn suspend_and_resume_purge_previous_network_epoch() {
+        let pool = PacketPool::new(3);
+        let (sender, receiver) = packet_channel(3, Duration::from_secs(1), true);
+        assert!(sender.force_send(pool.acquire()).is_ok());
+        receiver.suspend();
+        assert_eq!(pool.available(), pool.capacity());
+        assert!(sender.force_send(pool.acquire()).is_err());
+        receiver.resume();
+        assert!(sender.force_send(pool.acquire()).is_ok());
+        assert!(receiver.try_recv().is_some());
+        assert!(receiver.try_recv().is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn packet_queue_matches_bounded_reference_model(
+            actions in proptest::collection::vec((any::<u8>(), any::<u8>()), 1..=2_000)
+        ) {
+            prop_assert!(queue_trace_matches(&actions, true));
+        }
+    }
+
+    #[test]
+    fn queue_oracle_detects_keep_oldest_mutation() {
+        let actions = [
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (1, 6),
+            (1, 7),
+            (1, 8),
+            (2, 0),
+        ];
+        assert!(queue_trace_matches(&actions, true));
+        assert!(!queue_trace_matches(&actions, false));
+    }
+
+    #[test]
+    fn deterministic_queue_fault_generator_is_reproducible_and_complete() {
+        let first = deterministic_queue_actions(0x1234_5678_9abc_def0, 4_096);
+        let second = deterministic_queue_actions(0x1234_5678_9abc_def0, 4_096);
+        let different = deterministic_queue_actions(0x1234_5678_9abc_def1, 4_096);
+        assert_eq!(first, second);
+        assert_ne!(first, different);
+        let mut covered = [false; 6];
+        for &(operation, _) in &first {
+            covered[usize::from(operation % 6)] = true;
+        }
+        assert!(covered.into_iter().all(|value| value));
+        let (matches, coverage) = queue_trace_outcome(&first, true);
+        assert!(matches);
+        assert!(coverage.complete());
+    }
+
+    #[test]
+    fn queue_coverage_oracle_rejects_each_missing_state_transition() {
+        let complete = QueueCoverage {
+            full_rejection: 1,
+            forced_replacement: 1,
+            inactive_rejection: 1,
+            suspended: 1,
+            resumed: 1,
+            purged: 1,
+        };
+        assert!(complete.complete());
+        for index in 0..6 {
+            let mut mutated = complete;
+            match index {
+                0 => mutated.full_rejection = 0,
+                1 => mutated.forced_replacement = 0,
+                2 => mutated.inactive_rejection = 0,
+                3 => mutated.suspended = 0,
+                4 => mutated.resumed = 0,
+                _ => mutated.purged = 0,
+            }
+            assert!(!mutated.complete());
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit deterministic stability soak"]
+    fn deterministic_queue_chaos_soak() {
+        let seconds = std::env::var("CSQTT_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120)
+            .max(1);
+        let first_seed = std::env::var("CSQTT_SOAK_SEED")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let actions_per_seed = std::env::var("CSQTT_QUEUE_SOAK_ACTIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4_096)
+            .max(14);
+        let started = Instant::now();
+        let mut offset = 0u64;
+        loop {
+            let seed = first_seed.wrapping_add(offset);
+            let actions = deterministic_queue_actions(seed, actions_per_seed);
+            let (matches, coverage) = queue_trace_outcome(&actions, true);
+            assert!(
+                matches && coverage.complete(),
+                "packet queue diverged at reproducible seed {seed}"
+            );
+            offset = offset.wrapping_add(1);
+            if started.elapsed() >= Duration::from_secs(seconds) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_send_suspend_resume_storm_never_replays_previous_epoch() {
+        let pool = PacketPool::new(4_096);
+        let (sender, receiver) = packet_channel(64, Duration::from_secs(3_600), true);
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let mut threads = Vec::new();
+        for thread in 0..8u8 {
+            let sender = sender.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                for sequence in 0..25_000u32 {
+                    let mut packet = pool.acquire();
+                    packet.set_read_len(2).unwrap();
+                    packet.as_mut_slice()[0] = thread;
+                    packet.as_mut_slice()[1] = sequence as u8;
+                    drop(sender.force_send(packet));
+                }
+            }));
+        }
+        barrier.wait();
+        for cycle in 0..10_000 {
+            if cycle % 3 == 0 {
+                receiver.suspend();
+            } else if cycle % 3 == 1 {
+                receiver.resume();
+            } else {
+                while receiver.try_recv().is_some() {}
+            }
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        receiver.suspend();
+        receiver.resume();
+        let mut marker = pool.acquire();
+        marker.set_read_len(1).unwrap();
+        marker.as_mut_slice()[0] = 0xa5;
+        assert!(sender.force_send(marker).is_ok());
+        assert_eq!(receiver.try_recv().unwrap().as_slice(), [0xa5]);
+        assert!(receiver.try_recv().is_none());
+        drop(sender);
+        drop(receiver);
+        assert_eq!(pool.available(), pool.capacity());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn receiver_notification_race_has_no_lost_wakeup() {
+        let pool = PacketPool::new(1);
+        for sequence in 0..2_000 {
+            let (sender, receiver) = packet_channel(1, Duration::from_secs(1), true);
+            let cancel = CancellationToken::new();
+            let waiter_cancel = cancel.clone();
+            let waiter = tokio::spawn(async move { receiver.recv(&waiter_cancel).await });
+            if sequence % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            assert!(sender.force_send(pool.acquire()).is_ok());
+            let packet = tokio::time::timeout(Duration::from_millis(1000), waiter)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(packet.is_some());
+            drop(packet);
+            drop(sender);
+            assert_eq!(pool.available(), pool.capacity());
+        }
+    }
+
+    #[test]
+    fn receiver_drop_race_releases_every_buffer() {
+        for _ in 0..100 {
+            let pool = PacketPool::new(32);
+            let (sender, receiver) = packet_channel(8, Duration::from_secs(1), true);
+            let barrier = Arc::new(std::sync::Barrier::new(9));
+            let mut threads = Vec::new();
+            for _ in 0..8 {
+                let sender = sender.clone();
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    drop(sender.force_send(pool.acquire()));
+                }));
+            }
+            barrier.wait();
+            drop(receiver);
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            drop(sender);
+            assert_eq!(pool.available(), pool.capacity());
+        }
+    }
+
+    #[tokio::test]
+    async fn critical_task_panic_is_contained_and_cancels_runtime() {
+        let cancel = CancellationToken::new();
+        let task = spawn_critical("injected", cancel.clone(), async {
+            panic!("injected dispatcher panic");
+        });
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn successful_critical_task_does_not_cancel_runtime() {
+        let cancel = CancellationToken::new();
+        spawn_critical("completed", cancel.clone(), async {})
+            .await
+            .unwrap();
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_shutdown_completes_during_total_packet_deficit() {
+        let pool = PacketPool::new(1);
+        let held = pool.acquire();
+        let cancel = CancellationToken::new();
+        let (dispatcher, _) = Dispatcher::start(
+            "127.0.0.1:0",
+            None,
+            pool.clone(),
+            Arc::new(Stats::default()),
+            cancel,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_millis(100), dispatcher.shutdown())
+            .await
+            .unwrap();
+        drop(held);
+        assert_eq!(pool.available(), pool.capacity());
+    }
+}
+
+#[cfg(test)]
+mod transport_chaos_tests;
+
+#[cfg(test)]
+mod throughput_soak_tests;
