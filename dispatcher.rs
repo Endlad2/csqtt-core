@@ -245,10 +245,10 @@ impl Dispatcher {
             tun_config: tokio::sync::Mutex::new(None),
         });
 
-        if let Some(_name) = tun_uds {
+        if let Some(ref name) = tun_uds {
             #[cfg(unix)]
             {
-                let name = tun_uds.unwrap();
+                let name = name.clone();
                 crate::log_error!("[КЛИЕНТ] Запуск UDS-слушателя: {name} для получения TUN FD...");
                 let io_dispatcher = dispatcher.clone();
                 let task_cancel = dispatcher.cancel.clone();
@@ -439,10 +439,12 @@ impl Dispatcher {
             self_clone.read_tun_unix_async(device_clone, pool_clone, stats_clone).await;
         });
 
+        // Фиксим E0521: создаём owned receiver через опцию
+        let receiver_owned = std::mem::take(receiver);
         let self_clone = self.clone();
         let stats_clone = stats.clone();
         let mut write_handle = tokio::spawn(async move {
-            self_clone.write_tun_unix_async(device, receiver, stats_clone).await;
+            self_clone.write_tun_unix_async(device, receiver_owned, stats_clone).await;
         });
 
         tokio::select! {
@@ -465,7 +467,7 @@ impl Dispatcher {
         device: Arc<tokio::io::unix::AsyncFd<File>>,
         pool: Arc<PacketPool>,
         stats: Arc<Stats>,
-    ) {
+    ) -> Result<(), std::io::Error> {
         use std::os::fd::AsRawFd;
 
         let mut burst = 0usize;
@@ -473,7 +475,7 @@ impl Dispatcher {
 
         loop {
             if self.cancel.is_cancelled() {
-                return;
+                return Ok(());
             }
 
             let result = {
@@ -516,18 +518,18 @@ impl Dispatcher {
                 }
                 Ok(Ok(0)) => {
                     crate::log_error!("[TUN] Конец файла, ожидаем новый FD");
-                    return;
+                    return Ok(());
                 }
                 Ok(Err(e)) if is_retryable_tun_error(&e) => {
                     tokio::task::yield_now().await;
                 }
                 Ok(Err(e)) if is_closed_tun_error(&e) => {
                     crate::log_error!("[TUN] Интерфейс закрыт, ожидаем новый FD");
-                    return;
+                    return Ok(());
                 }
                 Ok(Err(e)) => {
                     crate::log_error!("[ОШИБКА] Чтение TUN завершено: {e}");
-                    return;
+                    return Err(e);
                 }
                 Err(_) => {
                     tokio::task::yield_now().await;
@@ -540,9 +542,9 @@ impl Dispatcher {
     async fn write_tun_unix_async(
         self: Arc<Self>,
         device: Arc<tokio::io::unix::AsyncFd<File>>,
-        receiver: &mut PacketReceiver,
+        mut receiver: PacketReceiver,
         stats: Arc<Stats>,
-    ) {
+    ) -> Result<(), std::io::Error> {
         use std::os::fd::AsRawFd;
 
         let mut burst = 0usize;
@@ -550,10 +552,10 @@ impl Dispatcher {
         loop {
             let packet = tokio::select! {
                 biased;
-                _ = self.cancel.cancelled() => return,
+                _ = self.cancel.cancelled() => return Ok(()),
                 packet = receiver.recv(&self.cancel) => match packet {
                     Some(packet) => packet,
-                    None => return,
+                    None => return Ok(()),
                 },
             };
 
@@ -596,11 +598,11 @@ impl Dispatcher {
                 }
                 Ok(Err(e)) if is_closed_tun_error(&e) => {
                     crate::log_error!("[TUN] Интерфейс закрыт, ожидаем новый FD");
-                    return;
+                    return Ok(());
                 }
                 Ok(Err(e)) => {
                     crate::log_error!("[ОШИБКА] Запись TUN завершена: {e}");
-                    return;
+                    return Err(e);
                 }
                 Err(_) => {
                     tokio::task::yield_now().await;
@@ -617,7 +619,6 @@ impl Dispatcher {
         pool: Arc<PacketPool>,
         stats: Arc<Stats>,
     ) {
-        // На Windows используем spawn_blocking для синхронного Device
         let device = Arc::new(tokio::sync::Mutex::new(device));
         let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
 
@@ -781,13 +782,16 @@ impl Dispatcher {
         let stats_clone = stats.clone();
         let device_clone = device.clone();
         let mut read_handle = tokio::spawn(async move {
-            self_clone.read_tun_unix_async(device_clone, pool_clone, stats_clone).await;
+            self_clone.read_tun_unix_async(device_clone, pool_clone, stats_clone).await
+                .unwrap_or_else(|e| crate::log_error!("[ОШИБКА] Чтение TUN: {e}"));
         });
 
+        let receiver_owned = std::mem::take(receiver);
         let self_clone = self.clone();
         let stats_clone = stats.clone();
         let mut write_handle = tokio::spawn(async move {
-            self_clone.write_tun_unix_async(device, receiver, stats_clone).await;
+            self_clone.write_tun_unix_async(device, receiver_owned, stats_clone).await
+                .unwrap_or_else(|e| crate::log_error!("[ОШИБКА] Запись TUN: {e}"));
         });
 
         tokio::select! {
