@@ -1,0 +1,300 @@
+name: Cross-Platform Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PROJECT_VERSION: ${{ github.ref_name }}
+
+jobs:
+  # ========== ПРОВЕРКА КОДА (fmt, clippy, tests) ==========
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+          override: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --quiet
+
+  # ========== СБОРКА WINDOWS x86_64 ==========
+  build-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          override: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build Windows x86_64
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            target/x86_64-pc-windows-msvc/release/*.exe
+            target/x86_64-pc-windows-msvc/release/*.dll
+            target/x86_64-pc-windows-msvc/release/*.pdb
+          retention-days: 30
+
+  # ========== СБОРКА LINUX ==========
+  build-linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Install dependencies (i686)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: linux-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-${{ matrix.target }}-cargo-
+
+      - name: Build Linux ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/*.so
+            target/${{ matrix.target }}/release/*.a
+            target/${{ matrix.target }}/release/client
+          retention-days: 30
+
+  # ========== СБОРКА ANDROID ==========
+  build-android:
+    name: Android (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+    env:
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/26.3.11579264
+      ANDROID_NDK_ROOT: ${{ github.workspace }}/android-sdk/ndk/26.3.11579264
+      JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      # ===== КЕШИРОВАНИЕ ANDROID SDK =====
+      - name: Cache Android SDK
+        id: cache-android
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}
+          key: android-sdk-ndk-26-${{ runner.os }}-${{ hashFiles('**/build.gradle') }}
+          restore-keys: android-sdk-ndk-26-${{ runner.os }}-
+
+      # ===== УСТАНОВКА SDK/NDK (только если нет кеша) =====
+      - name: Setup Android SDK & NDK
+        if: steps.cache-android.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $ANDROID_HOME
+          cd $ANDROID_HOME
+
+          # Устанавливаем commandlinetools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-*.zip
+          rm commandlinetools-linux-*.zip
+          mkdir -p cmdline-tools/latest
+          mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+
+          # Принимаем лицензии
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1
+
+          # Устанавливаем SDK и NDK
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" \
+            "platforms;android-33" \
+            "ndk;26.3.11579264" \
+            "cmake;3.22.1"
+
+      - name: Add Android SDK to PATH
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_NDK_HOME" >> $GITHUB_PATH
+
+      - name: Cache Cargo (Android)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: android-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: android-${{ matrix.target }}-cargo-
+
+      - name: Build Android ${{ matrix.abi }}
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_NDK_HOME:$PATH"
+          cargo ndk \
+            --target ${{ matrix.target }} \
+            --platform 33 \
+            --build-mode release \
+            --output-path target/${{ matrix.target }}/release
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          CMAKE_GENERATOR: Ninja
+
+      - name: Prepare Android .so files
+        run: |
+          mkdir -p ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}
+          if [ -f "target/${{ matrix.target }}/release/libclient.so" ]; then
+            cp target/${{ matrix.target }}/release/libclient.so \
+               ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}/
+          elif [ -f "target/${{ matrix.target }}/release/client" ]; then
+            cp target/${{ matrix.target }}/release/client \
+               ${{ github.workspace }}/android-jnilibs/${{ matrix.abi }}/libclient.so
+          fi
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ matrix.abi }}
+          path: |
+            android-jnilibs/${{ matrix.abi }}/*.so
+            target/${{ matrix.target }}/release/*.so
+            target/${{ matrix.target }}/release/client
+          retention-days: 30
+
+  # ========== ФИНАЛЬНЫЙ АРТЕФАКТ (все платформы) ==========
+  final-artifact:
+    name: Package All Artifacts
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-android]
+    if: always() && !cancelled()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create archive
+        run: |
+          mkdir -p release/${{ github.sha }}
+          cp -r artifacts/* release/${{ github.sha }}/
+          tar -czf release-${{ github.sha }}.tar.gz -C release ${{ github.sha }}
+
+      - name: Upload master artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-platforms-${{ github.sha }}
+          path: release-${{ github.sha }}.tar.gz
+          retention-days: 30
+
+      - name: List artifacts
+        run: |
+          echo "=== Built artifacts ==="
+          find artifacts -type f -exec ls -lh {} \;
