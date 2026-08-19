@@ -16,11 +16,11 @@ mod packet;
 mod path_validation;
 mod profiles;
 mod protocol;
-#[path = "../shared/selective_fec.rs"]
+#[path = "selective_fec.rs"]
 mod selective_fec;
 mod session;
 mod stats;
-#[path = "../shared/striped_scheduler.rs"]
+#[path = "striped_scheduler.rs"]
 mod striped_scheduler;
 mod stun_codec;
 mod tun;
