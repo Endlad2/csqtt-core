@@ -35,6 +35,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  WORKING_DIR: Core/rust-client
 
 jobs:
   # ============= TESTS =============
@@ -65,15 +66,15 @@ jobs:
 
       - name: Run tests
         run: cargo test --release
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ============= LINT =============
   lint:
@@ -104,11 +105,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -- -D warnings
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ============= LINUX =============
   build-linux:
@@ -147,13 +148,13 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: client-linux-${{ matrix.target }}
-          path: Core/rust-client/target/${{ matrix.target }}/release/client
+          path: ${{ env.WORKING_DIR }}/target/${{ matrix.target }}/release/client
 
   # ============= WINDOWS =============
   build-windows:
@@ -192,13 +193,13 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: client-windows-${{ matrix.target }}
-          path: Core/rust-client/target/${{ matrix.target }}/release/client.exe
+          path: ${{ env.WORKING_DIR }}/target/${{ matrix.target }}/release/client.exe
 
   # ============= macOS =============
   build-macos:
@@ -237,13 +238,13 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: client-macos-${{ matrix.target }}
-          path: Core/rust-client/target/${{ matrix.target }}/release/client
+          path: ${{ env.WORKING_DIR }}/target/${{ matrix.target }}/release/client
 
   # ============= ANDROID =============
   build-android:
@@ -283,6 +284,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
           echo "NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+          echo "PATH=$ANDROID_NDK_HOME/bin:$PATH" >> $GITHUB_ENV
 
       - name: Install cargo-ndk
         uses: actions-rs/cargo@v1
@@ -312,13 +314,13 @@ jobs:
 
       - name: Build with cargo-ndk
         run: cargo ndk --target ${{ matrix.target }} --platform 33 build --release
-        working-directory: Core/rust-client
+        working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: client-android-${{ matrix.target }}
-          path: Core/rust-client/target/${{ matrix.target }}/release/libclient.so
+          path: ${{ env.WORKING_DIR }}/target/${{ matrix.target }}/release/libclient.so
 
   # ============= CREATE RELEASE =============
   create-release:
@@ -460,7 +462,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ============= JNI LIBS FOR ANDROID =============
+  # ============= ANDROID JNI LIBS =============
   build-android-jni:
     name: Android JNI Libs (arm64, armv7)
     runs-on: ubuntu-latest
