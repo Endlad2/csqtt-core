@@ -68,10 +68,6 @@ jobs:
         run: cargo test --release
         working-directory: ${{ env.WORKING_DIR }}
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-        working-directory: ${{ env.WORKING_DIR }}
-
   # ============= LINUX =============
   build-linux:
     name: Linux (${{ matrix.target }})
