@@ -35,7 +35,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  WORKING_DIR: Core/rust-client
+  WORKING_DIR: rust-client
 
 jobs:
   # ============= TESTS =============
