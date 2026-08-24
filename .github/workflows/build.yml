@@ -187,11 +187,13 @@ jobs:
           command: install
           args: cargo-ndk --version 3.0.0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain with target
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
 
       - name: Cache cargo registry
         uses: actions/cache@v4
