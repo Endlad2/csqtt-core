@@ -2,22 +2,12 @@ name: Build and Release Rust Client
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
   release:
     types: [ created, published, edited ]
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release tag (e.g., v1.0.0)'
-        required: false
-        type: string
-      create_release:
-        description: 'Create GitHub Release'
-        required: false
-        default: false
-        type: boolean
 
 # ===== ПРАВА НА ЗАПИСЬ ДЛЯ СОЗДАНИЯ РЕЛИЗОВ =====
 permissions:
@@ -151,9 +141,8 @@ jobs:
     needs:
       - build-linux
       - build-windows
-    if: |
-      (github.event_name == 'release' && github.event.action == 'created') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+    # Создаем релиз при пуше в main/master ИЛИ при ручном запуске
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
       release_tag: ${{ steps.create_release.outputs.tag }}
@@ -161,13 +150,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Determine release tag
+      - name: Generate release tag
         id: get_tag
         run: |
           if [[ "${{ github.event_name }}" == "release" ]]; then
             echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
           else
-            echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TAG=$(date +'%Y.%m.%d.%H.%M')" >> $GITHUB_OUTPUT
           fi
 
       - name: Create GitHub Release
