@@ -187,13 +187,11 @@ jobs:
           command: install
           args: cargo-ndk --version 3.0.0
 
-      - name: Install Rust toolchain with Android targets
-        uses: actions-rs/toolchain@v1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          target: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-          override: true
-          profile: minimal
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
