@@ -1,0 +1,496 @@
+name: Build and Release Rust Client
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ created, published, edited ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: false
+        type: string
+      create_release:
+        description: 'Create GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+# ===== ПРАВА НА ЗАПИСЬ ДЛЯ СОЗДАНИЯ РЕЛИЗОВ =====
+permissions:
+  contents: write
+  actions: read
+  checks: read
+  deployments: read
+  issues: read
+  packages: read
+  pull-requests: read
+  repository-projects: read
+  security-events: read
+  statuses: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============= TESTS =============
+  test:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
+        run: cargo test --release
+        working-directory: Core/rust-client
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+        working-directory: Core/rust-client
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: Core/rust-client
+
+  # ============= LINT =============
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+        working-directory: Core/rust-client
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+        working-directory: Core/rust-client
+
+  # ============= LINUX =============
+  build-linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: Core/rust-client
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-${{ matrix.target }}
+          path: Core/rust-client/target/${{ matrix.target }}/release/client
+
+  # ============= WINDOWS =============
+  build-windows:
+    name: Windows (${{ matrix.target }})
+    runs-on: windows-latest
+    needs: [test, lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: Core/rust-client
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-windows-${{ matrix.target }}
+          path: Core/rust-client/target/${{ matrix.target }}/release/client.exe
+
+  # ============= macOS =============
+  build-macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    needs: [test, lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: Core/rust-client
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-macos-${{ matrix.target }}
+          path: Core/rust-client/target/${{ matrix.target }}/release/client
+
+  # ============= ANDROID =============
+  build-android:
+    name: Android (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - armv7-linux-androideabi
+          - i686-linux-android
+          - x86_64-linux-android
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-33
+            build-tools;33.0.0
+            cmake;3.22.1
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+          local-cache: true
+
+      - name: Set environment variables
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+
+      - name: Install cargo-ndk
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: cargo-ndk --version 3.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-android-
+
+      - name: Build with cargo-ndk
+        run: cargo ndk --target ${{ matrix.target }} --platform 33 build --release
+        working-directory: Core/rust-client
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-android-${{ matrix.target }}
+          path: Core/rust-client/target/${{ matrix.target }}/release/libclient.so
+
+  # ============= CREATE RELEASE =============
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux
+      - build-windows
+      - build-macos
+      - build-android
+    if: |
+      (github.event_name == 'release' && github.event.action == 'created') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_tag: ${{ steps.create_release.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: get_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_tag.outputs.RELEASE_TAG }}
+          name: Release ${{ steps.get_tag.outputs.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set output
+        run: |
+          echo "upload_url=${{ steps.create_release.outputs.upload_url }}" >> $GITHUB_OUTPUT
+          echo "release_tag=${{ steps.get_tag.outputs.RELEASE_TAG }}" >> $GITHUB_OUTPUT
+
+  # ============= UPLOAD ASSETS TO RELEASE =============
+  upload-assets:
+    name: Upload Assets to Release
+    runs-on: ubuntu-latest
+    needs: [create-release]
+    if: needs.create-release.outputs.upload_url != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        asset:
+          - name: client-linux-x86_64
+            path: client-linux-x86_64-unknown-linux-gnu/client
+            ext: ''
+          - name: client-linux-aarch64
+            path: client-linux-aarch64-unknown-linux-gnu/client
+            ext: ''
+          - name: client-windows-x86_64
+            path: client-windows-x86_64-pc-windows-msvc/client.exe
+            ext: .exe
+          - name: client-windows-aarch64
+            path: client-windows-aarch64-pc-windows-msvc/client.exe
+            ext: .exe
+          - name: client-macos-x86_64
+            path: client-macos-x86_64-apple-darwin/client
+            ext: ''
+          - name: client-macos-aarch64
+            path: client-macos-aarch64-apple-darwin/client
+            ext: ''
+          - name: libclient-android-arm64
+            path: client-android-aarch64-linux-android/libclient.so
+            ext: .so
+          - name: libclient-android-armv7
+            path: client-android-armv7-linux-androideabi/libclient.so
+            ext: .so
+          - name: libclient-android-x86
+            path: client-android-i686-linux-android/libclient.so
+            ext: .so
+          - name: libclient-android-x86_64
+            path: client-android-x86_64-linux-android/libclient.so
+            ext: .so
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare asset
+        run: |
+          mkdir -p release-assets
+          cp artifacts/${{ matrix.asset.path }} release-assets/${{ matrix.asset.name }}${{ matrix.asset.ext }}
+          chmod +x release-assets/${{ matrix.asset.name }}${{ matrix.asset.ext }} || true
+
+      - name: Upload asset to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.create-release.outputs.release_tag }}
+          files: release-assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============= UPDATE LATEST TAG =============
+  update-latest:
+    name: Update Latest Tag
+    runs-on: ubuntu-latest
+    needs: [create-release, upload-assets]
+    if: needs.create-release.outputs.release_tag != ''
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update latest tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest ${{ needs.create-release.outputs.release_tag }}
+          git push -f origin latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update latest release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: Latest Release
+          draft: false
+          prerelease: false
+          body: "Latest stable release from ${{ needs.create-release.outputs.release_tag }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============= JNI LIBS FOR ANDROID =============
+  build-android-jni:
+    name: Android JNI Libs (arm64, armv7)
+    runs-on: ubuntu-latest
+    needs: [build-android]
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: client-android-aarch64-linux-android
+          path: arm64
+
+      - name: Download armv7 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: client-android-armv7-linux-androideabi
+          path: armv7
+
+      - name: Prepare JNI libs structure
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/armeabi-v7a
+          cp arm64/libclient.so app/src/main/jniLibs/arm64-v8a/
+          cp armv7/libclient.so app/src/main/jniLibs/armeabi-v7a/
+
+      - name: Upload JNI libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-jni-libs
+          path: app/src/main/jniLibs/
