@@ -56,9 +56,9 @@ jobs:
         run: cargo test --release
         working-directory: ${{ env.WORKING_DIR }}
 
-  # ============= LINUX =============
+  # ============= LINUX x86_64 =============
   build-linux:
-    name: Linux
+    name: Linux x86_64
     runs-on: ubuntu-latest
     needs: [test]
     steps:
@@ -93,6 +93,147 @@ jobs:
         with:
           name: client-linux-x86_64
           path: ${{ env.WORKING_DIR }}/target/x86_64-unknown-linux-gnu/release/client
+
+  # ============= LINUX ARM64 =============
+  build-linux-arm64:
+    name: Linux ARM64
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-unknown-linux-gnu
+          override: true
+          profile: minimal
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-arm64-
+
+      - name: Configure linker
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-arm64
+          path: ${{ env.WORKING_DIR }}/target/aarch64-unknown-linux-gnu/release/client
+
+  # ============= LINUX ARMv7 =============
+  build-linux-armv7:
+    name: Linux ARMv7
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: armv7-unknown-linux-gnueabihf
+          override: true
+          profile: minimal
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-armv7-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-armv7-
+
+      - name: Configure linker
+        run: |
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
+          echo "CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --target armv7-unknown-linux-gnueabihf
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-armv7
+          path: ${{ env.WORKING_DIR }}/target/armv7-unknown-linux-gnueabihf/release/client
+
+  # ============= LINUX i686 =============
+  build-linux-i686:
+    name: Linux i686
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: i686-unknown-linux-gnu
+          override: true
+          profile: minimal
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-i686-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-linux-i686-
+
+      - name: Build
+        run: cargo build --release --target i686-unknown-linux-gnu
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-i686
+          path: ${{ env.WORKING_DIR }}/target/i686-unknown-linux-gnu/release/client
 
   # ============= WINDOWS =============
   build-windows:
@@ -136,7 +277,7 @@ jobs:
   upload-assets:
     name: Upload Assets to Release
     runs-on: ubuntu-latest
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-linux-arm64, build-linux-armv7, build-linux-i686, build-windows]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
@@ -171,9 +312,11 @@ jobs:
         run: |
           mkdir -p release-assets
           cp artifacts/client-linux-x86_64/client release-assets/client-linux-x86_64
+          cp artifacts/client-linux-arm64/client release-assets/client-linux-arm64
+          cp artifacts/client-linux-armv7/client release-assets/client-linux-armv7
+          cp artifacts/client-linux-i686/client release-assets/client-linux-i686
           cp artifacts/client-windows-x86_64/client.exe release-assets/client-windows-x86_64.exe
-          chmod +x release-assets/client-linux-x86_64 || true
-          chmod +x release-assets/client-windows-x86_64.exe || true
+          chmod +x release-assets/client-linux-x86_64 release-assets/client-linux-arm64 release-assets/client-linux-armv7 release-assets/client-linux-i686 || true
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v1
