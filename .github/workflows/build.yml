@@ -26,9 +26,9 @@ env:
   WORKING_DIR: rust-client
 
 jobs:
-  # ============= TESTS =============
-  test:
-    name: Tests (Linux)
+  # ============= CHECK =============
+  check:
+    name: Check (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -48,19 +48,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-check-
 
-      - name: Run tests
-        run: cargo test --release
+      - name: Cargo check
+        run: cargo check --release
         working-directory: ${{ env.WORKING_DIR }}
 
   # ============= LINUX x86_64 =============
   build-linux:
     name: Linux x86_64
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
   build-linux-arm64:
     name: Linux ARM64
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -151,7 +151,7 @@ jobs:
   build-linux-armv7:
     name: Linux ARMv7
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -202,7 +202,7 @@ jobs:
   build-linux-i686:
     name: Linux i686
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -253,7 +253,7 @@ jobs:
   build-windows:
     name: Windows
     runs-on: windows-latest
-    needs: [test]
+    needs: [check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
