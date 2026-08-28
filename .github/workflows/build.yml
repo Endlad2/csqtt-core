@@ -72,9 +72,6 @@ jobs:
           override: true
           profile: minimal
 
-      - name: Add target
-        run: rustup target add x86_64-unknown-linux-gnu
-
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -87,7 +84,9 @@ jobs:
             ${{ runner.os }}-cargo-linux-
 
       - name: Build
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          cargo build --release --target x86_64-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -112,9 +111,6 @@ jobs:
           override: true
           profile: minimal
 
-      - name: Add target
-        run: rustup target add aarch64-unknown-linux-gnu
-
       - name: Install cross-compilation dependencies
         run: |
           sudo apt-get update
@@ -138,7 +134,9 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --release --target aarch64-unknown-linux-gnu
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -163,9 +161,6 @@ jobs:
           override: true
           profile: minimal
 
-      - name: Add target
-        run: rustup target add armv7-unknown-linux-gnueabihf
-
       - name: Install cross-compilation dependencies
         run: |
           sudo apt-get update
@@ -189,7 +184,9 @@ jobs:
           echo "CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --release --target armv7-unknown-linux-gnueabihf
+        run: |
+          rustup target add armv7-unknown-linux-gnueabihf
+          cargo build --release --target armv7-unknown-linux-gnueabihf
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -214,9 +211,6 @@ jobs:
           override: true
           profile: minimal
 
-      - name: Add target
-        run: rustup target add i686-unknown-linux-gnu
-
       - name: Install cross-compilation dependencies
         run: |
           sudo apt-get update
@@ -240,7 +234,9 @@ jobs:
           echo "CXX_i686_unknown_linux_gnu=g++" >> $GITHUB_ENV
 
       - name: Build
-        run: cargo build --release --target i686-unknown-linux-gnu
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          cargo build --release --target i686-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -265,9 +261,6 @@ jobs:
           override: true
           profile: minimal
 
-      - name: Add target
-        run: rustup target add x86_64-pc-windows-msvc
-
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -280,7 +273,9 @@ jobs:
             ${{ runner.os }}-cargo-windows-
 
       - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo build --release --target x86_64-pc-windows-msvc
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
