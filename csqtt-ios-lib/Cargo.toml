@@ -1,0 +1,19 @@
+[package]
+name = "csqtt-ios-lib"
+version = "2.0.0"
+edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[lib]
+crate-type = ["staticlib"]
+name = "csqtt_ios"
+
+[dependencies]
+csqtt-client = { path = "../rust-client" }
+
+tokio = { version = "1.53", features = ["rt", "macros", "sync", "time", "rt-multi-thread"] }
+anyhow = "1.0"
+log = "0.4"
+tokio-util = "0.7"
+
+# uniffi НЕ нужен для статической библиотеки без биндингов
