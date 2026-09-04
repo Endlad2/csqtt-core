@@ -15,12 +15,12 @@ default = { crate-type = ["bin"] }
 
 [lib]
 name = "csqtt_client"
-path = "src/lib.rs"
+path = "lib.rs"
 crate-type = ["staticlib"]
 
 [[bin]]
 name = "client"
-path = "src/main.rs"
+path = "main.rs"
 required-features = ["bin"]
 
 [features]
@@ -66,8 +66,6 @@ getrandom = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["socket", "uio"] }
-
-[target.'cfg(windows)'.dependencies]
 
 [dev-dependencies]
 proptest = "1.11.0"
