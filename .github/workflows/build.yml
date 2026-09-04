@@ -7,7 +7,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# ===== ПРАВА НА ЗАПИСЬ ДЛЯ СОЗДАНИЯ РЕЛИЗОВ =====
 permissions:
   contents: write
   actions: read
@@ -24,6 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   WORKING_DIR: rust-client
+  IOS_WORKING_DIR: rust-client/ios-core
 
 jobs:
   # ============= CHECK =============
@@ -284,9 +284,48 @@ jobs:
           name: client-windows-x86_64
           path: ${{ env.WORKING_DIR }}/target/x86_64-pc-windows-msvc/release/client.exe
 
-  # ============= iOS SIMULATOR (x86_64) =============
+  # ============= MACOS =============
+  build-macos:
+    name: macOS
+    runs-on: macos-latest
+    needs: [check]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-
+
+      - name: Build
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-macos-x86_64
+          path: ${{ env.WORKING_DIR }}/target/x86_64-apple-darwin/release/client
+
+  # ============= iOS SIMULATOR (x86_64) - ИЗ ios-core =============
   build-ios-simulator:
-    name: iOS Simulator (x86_64)
+    name: iOS Simulator (x86_64) - staticlib
     runs-on: macos-latest
     needs: [check]
     steps:
@@ -315,17 +354,17 @@ jobs:
         run: |
           rustup target add x86_64-apple-ios
           cargo build --release --target x86_64-apple-ios
-        working-directory: ${{ env.WORKING_DIR }}
+        working-directory: ${{ env.IOS_WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: client-ios-simulator-x86_64
-          path: ${{ env.WORKING_DIR }}/target/x86_64-apple-ios/release/client
+          name: libcsqtt_ios_simulator_x86_64
+          path: ${{ env.IOS_WORKING_DIR }}/target/x86_64-apple-ios/release/libcsqtt_ios_core.a
 
-  # ============= iOS DEVICE (aarch64) =============
+  # ============= iOS DEVICE (aarch64) - ИЗ ios-core =============
   build-ios-device:
-    name: iOS Device (aarch64)
+    name: iOS Device (aarch64) - staticlib
     runs-on: macos-latest
     needs: [check]
     steps:
@@ -354,19 +393,55 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios
           cargo build --release --target aarch64-apple-ios
-        working-directory: ${{ env.WORKING_DIR }}
+        working-directory: ${{ env.IOS_WORKING_DIR }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: client-ios-device-aarch64
-          path: ${{ env.WORKING_DIR }}/target/aarch64-apple-ios/release/client
+          name: libcsqtt_ios_device_aarch64
+          path: ${{ env.IOS_WORKING_DIR }}/target/aarch64-apple-ios/release/libcsqtt_ios_core.a
+
+  # ============= iOS UNIVERSAL (Fat Binary) =============
+  build-ios-universal:
+    name: iOS Universal (Fat Binary)
+    runs-on: macos-latest
+    needs: [build-ios-simulator, build-ios-device]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download simulator artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libcsqtt_ios_simulator_x86_64
+          path: ios-artifacts/simulator
+
+      - name: Download device artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libcsqtt_ios_device_aarch64
+          path: ios-artifacts/device
+
+      - name: Create universal binary
+        run: |
+          mkdir -p ios-artifacts/universal
+          lipo -create \
+            ios-artifacts/simulator/libcsqtt_ios_core.a \
+            ios-artifacts/device/libcsqtt_ios_core.a \
+            -output ios-artifacts/universal/libcsqtt_ios_core.a
+          file ios-artifacts/universal/libcsqtt_ios_core.a
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcsqtt_ios_universal
+          path: ios-artifacts/universal/libcsqtt_ios_core.a
 
   # ============= UPLOAD ASSETS TO RELEASE =============
   upload-assets:
     name: Upload Assets to Release
     runs-on: ubuntu-latest
-    needs: [build-linux, build-linux-arm64, build-linux-armv7, build-linux-i686, build-windows, build-ios-simulator, build-ios-device]
+    needs: [build-linux, build-linux-arm64, build-linux-armv7, build-linux-i686, build-windows, build-macos, build-ios-universal]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
@@ -405,10 +480,13 @@ jobs:
           cp artifacts/client-linux-armv7/client release-assets/client-linux-armv7
           cp artifacts/client-linux-i686/client release-assets/client-linux-i686
           cp artifacts/client-windows-x86_64/client.exe release-assets/client-windows-x86_64.exe
-          cp artifacts/client-ios-simulator-x86_64/client release-assets/client-ios-simulator-x86_64
-          cp artifacts/client-ios-device-aarch64/client release-assets/client-ios-device-aarch64
-          chmod +x release-assets/client-linux-x86_64 release-assets/client-linux-arm64 release-assets/client-linux-armv7 release-assets/client-linux-i686 || true
-          chmod +x release-assets/client-ios-simulator-x86_64 release-assets/client-ios-device-aarch64 || true
+          cp artifacts/client-macos-x86_64/client release-assets/client-macos-x86_64
+          cp artifacts/libcsqtt_ios_universal/libcsqtt_ios_core.a release-assets/libcsqtt_ios_core.a
+          chmod +x release-assets/client-linux-x86_64 || true
+          chmod +x release-assets/client-linux-arm64 || true
+          chmod +x release-assets/client-linux-armv7 || true
+          chmod +x release-assets/client-linux-i686 || true
+          chmod +x release-assets/client-macos-x86_64 || true
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v1
