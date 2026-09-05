@@ -1,3 +1,4 @@
+// rust-client/tun.rs
 // SPDX-FileCopyrightText: 2026 amurcanov
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
@@ -5,7 +6,8 @@ use anyhow::{Result, bail};
 use std::fs::File;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
+// ===== Unix (Linux, Android) - полноценный TUN =====
+#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
 pub async fn receive_fd(name: String, cancel: CancellationToken) -> Result<File> {
     use nix::{
         cmsg_space,
@@ -99,7 +101,16 @@ pub async fn receive_fd(name: String, cancel: CancellationToken) -> Result<File>
     }
 }
 
+// ===== iOS, macOS, и другие Unix-платформы (без TUN) =====
+#[cfg(all(unix, any(target_os = "ios", target_os = "macos")))]
+pub async fn receive_fd(_name: String, _cancel: CancellationToken) -> Result<File> {
+    crate::log_error!("[TUN] Switching to proxy mode (TUN not supported on this platform)");
+    bail!("TUN FD transport is not supported on this platform, use proxy mode")
+}
+
+// ===== Windows и другие не-Unix =====
 #[cfg(not(unix))]
 pub async fn receive_fd(_name: String, _cancel: CancellationToken) -> Result<File> {
-    bail!("TUN FD transport is available only on Android and Unix")
+    crate::log_error!("[TUN] Switching to proxy mode (TUN not supported on this platform)");
+    bail!("TUN FD transport is not supported on this platform, use proxy mode")
 }
