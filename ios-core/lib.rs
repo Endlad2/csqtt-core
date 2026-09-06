@@ -1,6 +1,10 @@
 // ios-core/lib.rs
 #![allow(dead_code, unused_imports)]
 
+// Shared modules from ../../shared/
+mod shared;
+use shared::*;
+
 // Импортируем модули из папки rust-client (../)
 #[path = "../auth.rs"]
 mod auth;
@@ -300,6 +304,7 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
         start_pacer: std::sync::Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
         credential_pacer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         ready_credential_tx: None,
+        server_stream_repair: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         config_sent: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         config_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         repair,
