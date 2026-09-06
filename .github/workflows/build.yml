@@ -332,6 +332,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Copy ios-core to rust-client
+        run: |
+          mkdir -p rust-client
+          cp -r ios-core rust-client/
+
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -370,6 +375,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Copy ios-core to rust-client
+        run: |
+          mkdir -p rust-client
+          cp -r ios-core rust-client/
 
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
