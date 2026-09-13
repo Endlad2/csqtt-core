@@ -6,8 +6,12 @@
 # Качает zip-архив нужной ветки из Endlad2/csqtt-core, распаковывает
 # и выполняет все шаги внутри распакованной директории.
 #
-# КРИТИЧНО: target ставится под тот же канал, что форсит
-# rust-client/rust-toolchain.toml (иначе E0463 "can't find crate for core").
+# КРИТИЧНО:
+#   1) target ставится под тот же канал, что форсит
+#      rust-client/rust-toolchain.toml (иначе E0463)
+#   2) RUSTUP_TOOLCHAIN выставляется для ВСЕХ шагов сборки,
+#      чтобы rustup не откатывался на default toolchain за пределами
+#      директории rust-client/.
 
 name: build-openwrt-flint2
 
@@ -42,6 +46,9 @@ env:
   SDK_SHA256: 1b0316604a3e820b2b008a1baff3f9dac6716af942bef800930e58c7de98c98b
 
   RUST_TARGET: aarch64-unknown-linux-musl
+
+  # Дефолт — если toolchain не будет прочитан, всё равно не откатимся на stable
+  RUSTUP_TOOLCHAIN: "1.97.1"
 
 jobs:
   build:
@@ -128,6 +135,7 @@ jobs:
               | sh -s -- -y --profile minimal --default-toolchain stable
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup --version
           cargo --version
 
@@ -145,12 +153,18 @@ jobs:
           [ -n "$CHANNEL" ] || CHANNEL="stable"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "Detected toolchain channel: $CHANNEL"
+          # Экспортируем в GITHUB_ENV, чтобы было видно во ВСЕХ последующих шагах
+          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+
+      # --- ЕДИНСТВЕННЫЙ шаг где ставим toolchain и target ---
+      # ВАЖНО: после этого шага НИКОГДА не вызывать `rustup toolchain install`
+      # с другим каналом, и НИКОГДА не заходить в директорию без
+      # rust-toolchain.toml без явного RUSTUP_TOOLCHAIN.
 
       - name: Install Rust toolchain channel and musl target
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}/rust-client
         run: |
-          rustup target add aarch64-unknown-linux-musl
           set -euo pipefail
           CHANNEL="${{ steps.toolchain.outputs.channel }}"
 
@@ -163,15 +177,24 @@ jobs:
           echo "==> rustup show"
           rustup show
 
+          echo "==> Targets for $CHANNEL:"
           rustup target list --installed --toolchain "$CHANNEL" | tee /tmp/installed_targets.txt
           grep -Fx "${{ env.RUST_TARGET }}" /tmp/installed_targets.txt \
             || { echo "::error::target not installed for channel $CHANNEL"; exit 1; }
 
+          # --- PROBE: только теперь, с явным RUSTUP_TOOLCHAIN ---
+          # Раньше probe падал потому что в /tmp нет rust-toolchain.toml,
+          # и rustup брал default stable без musl target.
+          # Теперь RUSTUP_TOOLCHAIN уже в GITHUB_ENV и виден здесь.
+          echo "==> Probe build in /tmp with RUSTUP_TOOLCHAIN=$CHANNEL"
           cd /tmp
           rm -rf probe-target
           cargo new --bin probe-target >/dev/null
           cd probe-target
-          cargo build --target "${{ env.RUST_TARGET }}" >/dev/null
+
+          # Явно и на всякий случай — даже если GITHUB_ENV ещё не подхватился
+          RUSTUP_TOOLCHAIN="$CHANNEL" cargo build --target "${{ env.RUST_TARGET }}" -v 2>&1 | tail -20
+
           echo "probe build OK"
 
       - name: Cache OpenWrt SDK
@@ -216,15 +239,21 @@ jobs:
           mkdir -p dist
           ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
 
+      # --- ГЛАВНЫЙ ШАГ: сборка ядра ---
+      # RUSTUP_TOOLCHAIN уже в env из шага "Read toolchain channel",
+      # поэтому cargo гарантированно возьмёт правильный канал,
+      # даже находясь в rust-client/ где есть rust-toolchain.toml.
       - name: Build csqtt-client (Rust)
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
-        env:
-          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.channel }}
         run: |
           set -euo pipefail
+          echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN"
+          rustup show
+          rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}" \
+            || { echo "::error::target not visible for $RUSTUP_TOOLCHAIN"; exit 1; }
+
           mkdir -p dist
-          rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}"
           ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
 
       - name: Verify static linkage and print hashes
