@@ -150,6 +150,7 @@ jobs:
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}/rust-client
         run: |
+          rustup target add aarch64-unknown-linux-musl
           set -euo pipefail
           CHANNEL="${{ steps.toolchain.outputs.channel }}"
 
