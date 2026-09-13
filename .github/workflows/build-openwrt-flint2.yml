@@ -1,0 +1,238 @@
+# SPDX-FileCopyrightText: 2026 amurcanov
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+#
+# Сборка CSQTT-core 2.1.5 (Flint2 fork) под OpenWrt 25.12.5 / aarch64_generic / musl.
+#
+# Собирает:
+#   - csqtt-client        (Rust, static musl AArch64) — из rust-client/
+#   - csqtt-tun-adapter   (C, static musl AArch64)   — из openwrt/tun-adapter/
+#
+# Оба бинарника собираются ОДНИМ OpenWrt SDK toolchain (gcc-14.3.0, musl),
+# чтобы ABI совпадал. Host glibc toolchain НЕ используется.
+#
+# ВАЖНО (баг actions):
+#   `rustup target add` выполняется В ТОМ ЖЕ JOB, ЧТО И СБОРКА.
+#   Если вынести в отдельный job — target не подхватится.
+
+name: build-openwrt-flint2
+
+on:
+  push:
+    branches:
+      - openwrt-2.0.0
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag to attach artifacts to (optional)"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+  # OpenWrt SDK — точная версия из openwrt/download-openwrt-sdk.sh
+  SDK_NAME: openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
+  SDK_SHA256: 1b0316604a3e820b2b008a1baff3f9dac6716af942bef800930e58c7de98c98b
+
+  # Rust target под OpenWrt musl
+  RUST_TARGET: aarch64-unknown-linux-musl
+
+jobs:
+  build:
+    name: openwrt aarch64-musl (client + tun-adapter)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify repository layout
+        run: |
+          set -euo pipefail
+          for path in \
+            rust-client/Cargo.toml \
+            rust-client/main.rs \
+            openwrt/download-openwrt-sdk.sh \
+            openwrt/build-musl.sh \
+            openwrt/build-tun-adapter.sh \
+            openwrt/tun-adapter/csqtt-tun-adapter.c
+          do
+            if [ ! -e "$path" ]; then
+              echo "::error::missing required file: $path"
+              exit 1
+            fi
+          done
+          echo "layout OK"
+
+      - name: Make scripts executable
+        run: |
+          set -euo pipefail
+          chmod +x openwrt/download-openwrt-sdk.sh
+          chmod +x openwrt/build-musl.sh
+          chmod +x openwrt/build-tun-adapter.sh
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang lld build-essential pkg-config \
+            zstd curl file
+
+      # --- OpenWrt SDK (кэш + скачивание с проверкой SHA-256) ---------------
+
+      - name: Cache OpenWrt SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: .cache/openwrt-sdk
+          key: openwrt-sdk-${{ env.SDK_NAME }}-${{ env.SDK_SHA256 }}
+          restore-keys: |
+            openwrt-sdk-${{ env.SDK_NAME }}-
+
+      - name: Download and verify OpenWrt SDK
+        run: ./openwrt/download-openwrt-sdk.sh
+
+      - name: Export SDK_ROOT
+        run: |
+          set -euo pipefail
+          SDK_ROOT="$PWD/.cache/openwrt-sdk/${{ env.SDK_NAME }}"
+          COMPILER="$SDK_ROOT/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl/bin/aarch64-openwrt-linux-musl-gcc"
+          [ -x "$COMPILER" ] || { echo "::error::SDK toolchain missing: $COMPILER"; exit 1; }
+          "$COMPILER" --version
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+      # --- Rust toolchain + musl target В ОДНОМ ШАГЕ -----------------------
+
+      - name: Setup Rust with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Verify Rust target installed
+        run: rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-openwrt-${{ hashFiles('rust-client/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-openwrt-
+
+      # --- Сборка ----------------------------------------------------------
+
+      - name: Build csqtt-tun-adapter (C)
+        run: |
+          set -euo pipefail
+          ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
+
+      - name: Build csqtt-client (Rust)
+        run: |
+          set -euo pipefail
+          ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
+
+      # --- Проверки --------------------------------------------------------
+
+      - name: Verify static linkage and print hashes
+        run: |
+          set -euo pipefail
+          for BIN in dist/csqtt-client dist/csqtt-tun-adapter; do
+            echo "=== $BIN ==="
+            file "$BIN"
+            if file "$BIN" | grep -qi 'dynamically linked'; then
+              echo "::error::$BIN is dynamically linked; expected static musl"
+              exit 1
+            fi
+            sha256sum "$BIN" | tee "$BIN.sha256"
+          done
+
+      - name: Compare client hash against FLINT2_BUILD.md reference
+        run: |
+          set -euo pipefail
+          ACTUAL=$(sha256sum dist/csqtt-client | awk '{print $1}')
+          EXPECTED="387338f1bbf6e6f3d4d95b9512fadd1633441a37aa324e9435578e3759bf5b9c"
+          if [ "$ACTUAL" = "$EXPECTED" ]; then
+            echo "csqtt-client hash matches FLINT2_BUILD.md reference ✓"
+          else
+            echo "::warning::csqtt-client hash $ACTUAL differs from reference $EXPECTED"
+          fi
+
+      # --- Упаковка --------------------------------------------------------
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          PKG=csqtt-openwrt-25.12.5-aarch64-musl
+          mkdir -p "package/$PKG"
+
+          cp dist/csqtt-client             "package/$PKG/"
+          cp dist/csqtt-tun-adapter        "package/$PKG/"
+          cp dist/csqtt-client.sha256      "package/$PKG/"
+          cp dist/csqtt-tun-adapter.sha256 "package/$PKG/"
+
+          [ -f openwrt/FLINT2_BUILD.md ]     && cp openwrt/FLINT2_BUILD.md     "package/$PKG/BUILD.md"
+          [ -f openwrt/TUN_ADAPTER_PLAN.md ] && cp openwrt/TUN_ADAPTER_PLAN.md "package/$PKG/TUN_ADAPTER_PLAN.md"
+
+          cat > "package/$PKG/README.txt" <<'EOF'
+          CSQTT core + TUN adapter для OpenWrt 25.12.5 / Flint 2 (aarch64_generic, musl)
+
+          Артефакты:
+            csqtt-client        — Rust-ядро (static musl AArch64)
+            csqtt-tun-adapter   — C-хелпер: создаёт csqtt0 и передаёт FD по abstract UDS
+
+          Быстрый старт (root):
+
+            1) Адаптер (создаёт csqtt0 и отдаёт FD ядру):
+                 ./csqtt-tun-adapter --interface csqtt0 --uds csqtt-tun-v1 --up &
+
+            2) Ядро (слушает abstract UDS, забирает FD, идёт в TURN/VK):
+                 ./csqtt-client --tun-uds csqtt-tun-v1 --peer <host:port> --vk <hash> --password <pass>
+
+            3) Настройка сети (адаптер этого НЕ делает):
+                 ip addr add <TUNCONF_IP>/32 dev csqtt0
+                 ip route add default dev csqtt0 table 32050
+                 ip rule add fwmark 0xc5/0xff lookup 32050
+                 nft add rule inet fw4 mangle_output meta mark set 0xc5
+
+          Проверка:
+            ip -4 route get 1.1.1.1 mark 0xc5
+            tcpdump -i csqtt0 -n
+
+          Порядок запуска:
+            Адаптер ретраит подключение к UDS до 30 секунд (--timeout).
+            Рекомендуется: ядро первым, потом адаптер.
+
+          Безопасность:
+            Оба процесса работают от root. Адаптер проверяет SO_PEERCRED
+            и принимает FD только от root-owned UDS listener'а.
+          EOF
+
+          tar -czf "$PKG.tar.gz" -C package "$PKG"
+          sha256sum "$PKG.tar.gz" | tee "$PKG.tar.gz.sha256"
+          ls -lh "$PKG.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: csqtt-openwrt-25.12.5-aarch64-musl
+          path: |
+            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz
+            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz.sha256
+            dist/*
+          if-no-files-found: error
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz
+            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz.sha256
+          fail_on_unmatched_files: false
