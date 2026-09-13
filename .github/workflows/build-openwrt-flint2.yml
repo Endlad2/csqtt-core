@@ -4,17 +4,15 @@
 # Сборка CSQTT-core 2.1.5 (Flint2 fork, ветка openwrt-2.0.0) под OpenWrt 25.12.5.
 #
 # Workflow НЕ чекаутит код из текущего репо.
-# Вместо этого он качает zip-архив ветки openwrt-2.0.0 из upstream-репозитория
-# Endlad2/csqtt-core, распаковывает его и выполняет все шаги внутри
-# распакованной директории csqtt-core-openwrt-2.0.0/.
+# Качает zip-архив нужной ветки из Endlad2/csqtt-core, распаковывает
+# и выполняет все шаги внутри распакованной директории.
 #
-# Собирает:
-#   - csqtt-client        (Rust, static musl AArch64) — из rust-client/
-#   - csqtt-tun-adapter   (C, static musl AArch64)   — из openwrt/tun-adapter/
-#
-# ВАЖНО (баг actions):
-#   `rustup target add` выполняется В ТОМ ЖЕ JOB, ЧТО И СБОРКА.
-#   Если вынести в отдельный job — target не подхватится.
+# КРИТИЧНО (иначе E0463 "can't find crate for core"):
+#   В репе есть rust-client/rust-toolchain.toml, который форсит канал 1.97.1.
+#   Когда cargo запускается изнутри rust-client/, rustup переключается на
+#   этот toolchain, и target, установленный для default stable, там НЕ виден.
+#   Поэтому target ставится явно под тот же канал, из той же директории,
+#   непосредственно перед сборкой.
 
 name: build-openwrt-flint2
 
@@ -45,10 +43,8 @@ env:
   # Источник кода
   SOURCE_REPO: Endlad2/csqtt-core
   SOURCE_REF: openwrt-2.0.0
-  # Имя папки после распаковки zip: <repo>-<ref>
-  SOURCE_DIR: csqtt-core-openwrt-2.0.0
 
-  # OpenWrt SDK — точная версия из openwrt/download-openwrt-sdk.sh
+  # OpenWrt SDK
   SDK_NAME: openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
   SDK_SHA256: 1b0316604a3e820b2b008a1baff3f9dac6716af942bef800930e58c7de98c98b
 
@@ -79,7 +75,6 @@ jobs:
           echo "Downloading $URL"
           curl --fail --location --retry 3 --output /tmp/source.zip "$URL" \
             || {
-              # Если это не ветка (тег или commit) — пробуем refs/tags или refs/heads
               echo "heads/$REF failed, trying tags/$REF"
               URL="https://github.com/${{ env.SOURCE_REPO }}/archive/refs/tags/$REF.zip"
               curl --fail --location --retry 3 --output /tmp/source.zip "$URL"
@@ -87,9 +82,6 @@ jobs:
 
           echo "Extracting..."
           unzip -q /tmp/source.zip -d /tmp/source
-          ls -la /tmp/source/
-
-          # GitHub zip всегда даёт папку <repo>-<ref>
           EXTRACTED=$(find /tmp/source -mindepth 1 -maxdepth 1 -type d | head -n1)
           [ -n "$EXTRACTED" ] || { echo "::error::nothing extracted"; exit 1; }
           echo "Extracted to: $EXTRACTED"
@@ -130,9 +122,68 @@ jobs:
             cmake clang lld build-essential pkg-config \
             zstd curl unzip file
 
-      # --- OpenWrt SDK (кэш + скачивание с проверкой SHA-256) ---------------
-      # Кэш SDK привязываем к конкретному SOURCE_DIR, чтобы SDK_ROOT
-      # случайно не переехал в другую папку.
+      # --- Rust: ставим базовый toolchain (без target) ---------------------
+      # Target поставим позже, явно, под тот канал, который форсит
+      # rust-client/rust-toolchain.toml (1.97.1).
+
+      - name: Install rustup
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s --|
+              |-|al --default-toolchain stable
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup --version
+          cargo --version
+
+      - name: Read toolchain channel from rust-toolchain.toml
+        id: toolchain
+        working-directory: ${{ env.SOURCE_DIR }}/rust-client
+        run: |
+          set -euo pipefail
+          if [ -f rust-toolchain.toml ]; then
+            CHANNEL=$(grep -E '^\s*channel\s*=' rust-toolchain.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
+          else
+            CHANNEL="stable"
+          fi
+          [ -n "$CHANNEL" ] || CHANNEL="stable"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Detected toolchain channel: $CHANNEL"
+
+      # --- КРИТИЧНЫЙ ШАГ: ставим target ПОД ТОТ ЖЕ КАНАЛ -------------------
+      # Это и есть фикс E0463. Делаем это В ОДНОМ ШАГЕ с проверкой,
+      # из директории rust-client/, где cargo будет запускаться.
+
+      - name: Install Rust toolchain channel and musl target
+        working-directory: ${{ env.SOURCE_DIR }}/rust-client
+        run: |
+          set -euo pipefail
+          CHANNEL="${{ steps.toolchain.outputs.channel }}"
+
+          echo "==> Installing toolchain: $CHANNEL"
+          rustup toolchain install "$CHANNEL" --profile minimal
+
+          echo "==> Adding target ${{ env.RUST_TARGET }} to $CHANNEL"
+          rustup target add "${{ env.RUST_TARGET }}" --toolchain "$CHANNEL"
+
+          echo "==> Verifying target is visible to the toolchain that cargo will use"
+          # Показываем какой toolchain активируется в этой директории
+          rustup show
+
+          # Явная проверка: target должен быть в списке installed для этого канала
+          rustup target list --installed --toolchain "$CHANNEL" | tee /tmp/installed_targets.txt
+          grep -Fx "${{ env.RUST_TARGET }}" /tmp/installed_targets.txt \
+            || { echo "::error::target ${{ env.RUST_TARGET }} not installed for channel $CHANNEL"; exit 1; }
+
+          # Пробная компиляция тривиального crate под этот target
+          # — ловит любые проблемы с target'ом ДО основной сборки
+          cd /tmp
+          cargo new --bin probe-target >/dev/null 2>&1 || true
+          cd probe-target
+          cargo build --target "${{ env.RUST_TARGET }}" >/dev/null
+          echo "probe build OK"
 
       - name: Cache OpenWrt SDK
         id: cache-sdk
@@ -157,16 +208,6 @@ jobs:
           "$COMPILER" --version
           echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
-      # --- Rust toolchain + musl target В ОДНОМ ШАГЕ -----------------------
-
-      - name: Setup Rust with musl target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ env.RUST_TARGET }}
-
-      - name: Verify Rust target installed
-        run: rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}"
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -186,14 +227,22 @@ jobs:
           mkdir -p dist
           ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
 
+      # --- Сборка Rust: target уже установлен под нужный канал -------------
+      # build-musl.sh сам вызывает cargo с CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER,
+      # поэтому ничего дополнительно передавать не нужно.
+
       - name: Build csqtt-client (Rust)
         working-directory: ${{ env.SOURCE_DIR }}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.channel }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
 
-      # --- Проверки --------------------------------------------------------
+          # Ещё раз убеждаемся, что rustup видит target в активированном канале
+          rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}"
+
+          ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
 
       - name: Verify static linkage and print hashes
         working-directory: ${{ env.SOURCE_DIR }}
@@ -220,8 +269,6 @@ jobs:
           else
             echo "::warning::csqtt-client hash $ACTUAL differs from reference $EXPECTED"
           fi
-
-      # --- Упаковка --------------------------------------------------------
 
       - name: Package tarball
         working-directory: ${{ env.SOURCE_DIR }}
@@ -275,7 +322,6 @@ jobs:
           sha256sum "$PKG.tar.gz" | tee "$PKG.tar.gz.sha256"
           ls -lh "$PKG.tar.gz"
 
-          # Отдаём наверх для следующих шагов
           echo "PKG=$PKG" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -294,5 +340,4 @@ jobs:
         with:
           files: |
             ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
-            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
-          fail_on_unmatched_files: false
+            ${{ env.SOURCE_DIR }
