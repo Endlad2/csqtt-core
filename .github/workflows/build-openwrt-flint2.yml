@@ -7,12 +7,8 @@
 # Качает zip-архив нужной ветки из Endlad2/csqtt-core, распаковывает
 # и выполняет все шаги внутри распакованной директории.
 #
-# КРИТИЧНО (иначе E0463 "can't find crate for core"):
-#   В репе есть rust-client/rust-toolchain.toml, который форсит канал 1.97.1.
-#   Когда cargo запускается изнутри rust-client/, rustup переключается на
-#   этот toolchain, и target, установленный для default stable, там НЕ виден.
-#   Поэтому target ставится явно под тот же канал, из той же директории,
-#   непосредственно перед сборкой.
+# КРИТИЧНО: target ставится под тот же канал, что форсит
+# rust-client/rust-toolchain.toml (иначе E0463 "can't find crate for core").
 
 name: build-openwrt-flint2
 
@@ -40,15 +36,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-  # Источник кода
   SOURCE_REPO: Endlad2/csqtt-core
   SOURCE_REF: openwrt-2.0.0
 
-  # OpenWrt SDK
   SDK_NAME: openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
   SDK_SHA256: 1b0316604a3e820b2b008a1baff3f9dac6716af942bef800930e58c7de98c98b
 
-  # Rust target под OpenWrt musl
   RUST_TARGET: aarch64-unknown-linux-musl
 
 jobs:
@@ -122,17 +115,12 @@ jobs:
             cmake clang lld build-essential pkg-config \
             zstd curl unzip file
 
-      # --- Rust: ставим базовый toolchain (без target) ---------------------
-      # Target поставим позже, явно, под тот канал, который форсит
-      # rust-client/rust-toolchain.toml (1.97.1).
-
       - name: Install rustup
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s --|
-              |-|al --default-toolchain stable
+              | sh -s -- -y --profile minimal --default-toolchain stable
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
           rustup --version
@@ -144,17 +132,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f rust-toolchain.toml ]; then
-            CHANNEL=$(grep -E '^\s*channel\s*=' rust-toolchain.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
+            CHANNEL=$(grep -E '^[[:space:]]*channel[[:space:]]*=' rust-toolchain.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
           else
             CHANNEL="stable"
           fi
           [ -n "$CHANNEL" ] || CHANNEL="stable"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "Detected toolchain channel: $CHANNEL"
-
-      # --- КРИТИЧНЫЙ ШАГ: ставим target ПОД ТОТ ЖЕ КАНАЛ -------------------
-      # Это и есть фикс E0463. Делаем это В ОДНОМ ШАГЕ с проверкой,
-      # из директории rust-client/, где cargo будет запускаться.
 
       - name: Install Rust toolchain channel and musl target
         working-directory: ${{ env.SOURCE_DIR }}/rust-client
@@ -168,19 +152,16 @@ jobs:
           echo "==> Adding target ${{ env.RUST_TARGET }} to $CHANNEL"
           rustup target add "${{ env.RUST_TARGET }}" --toolchain "$CHANNEL"
 
-          echo "==> Verifying target is visible to the toolchain that cargo will use"
-          # Показываем какой toolchain активируется в этой директории
+          echo "==> rustup show"
           rustup show
 
-          # Явная проверка: target должен быть в списке installed для этого канала
           rustup target list --installed --toolchain "$CHANNEL" | tee /tmp/installed_targets.txt
           grep -Fx "${{ env.RUST_TARGET }}" /tmp/installed_targets.txt \
-            || { echo "::error::target ${{ env.RUST_TARGET }} not installed for channel $CHANNEL"; exit 1; }
+            || { echo "::error::target not installed for channel $CHANNEL"; exit 1; }
 
-          # Пробная компиляция тривиального crate под этот target
-          # — ловит любые проблемы с target'ом ДО основной сборки
           cd /tmp
-          cargo new --bin probe-target >/dev/null 2>&1 || true
+          rm -rf probe-target
+          cargo new --bin probe-target >/dev/null
           cd probe-target
           cargo build --target "${{ env.RUST_TARGET }}" >/dev/null
           echo "probe build OK"
@@ -218,18 +199,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-openwrt-
 
-      # --- Сборка ----------------------------------------------------------
-
       - name: Build csqtt-tun-adapter (C)
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           mkdir -p dist
           ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
-
-      # --- Сборка Rust: target уже установлен под нужный канал -------------
-      # build-musl.sh сам вызывает cargo с CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER,
-      # поэтому ничего дополнительно передавать не нужно.
 
       - name: Build csqtt-client (Rust)
         working-directory: ${{ env.SOURCE_DIR }}
@@ -238,10 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-
-          # Ещё раз убеждаемся, что rustup видит target в активированном канале
           rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}"
-
           ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
 
       - name: Verify static linkage and print hashes
@@ -265,13 +237,16 @@ jobs:
           ACTUAL=$(sha256sum dist/csqtt-client | awk '{print $1}')
           EXPECTED="387338f1bbf6e6f3d4d95b9512fadd1633441a37aa324e9435578e3759bf5b9c"
           if [ "$ACTUAL" = "$EXPECTED" ]; then
-            echo "csqtt-client hash matches FLINT2_BUILD.md reference ✓"
+            echo "csqtt-client hash matches FLINT2_BUILD.md reference (OK)"
           else
             echo "::warning::csqtt-client hash $ACTUAL differs from reference $EXPECTED"
           fi
 
       - name: Package tarball
         working-directory: ${{ env.SOURCE_DIR }}
+        env:
+          # Передаём значения через env — тогда не нужны ${{ }} внутри heredoc
+          SOURCE_REPO: ${{ env.SOURCE_REPO }}
         run: |
           set -euo pipefail
           REF="${{ steps.src.outputs.ref }}"
@@ -286,36 +261,38 @@ jobs:
           [ -f openwrt/FLINT2_BUILD.md ]     && cp openwrt/FLINT2_BUILD.md     "package/$PKG/BUILD.md"
           [ -f openwrt/TUN_ADAPTER_PLAN.md ] && cp openwrt/TUN_ADAPTER_PLAN.md "package/$PKG/TUN_ADAPTER_PLAN.md"
 
+          # Одинарные кавычки вокруг EOF — внутри heredoc НЕТ подстановки
+          # ни ${{ }}, ни ${VAR}. Все значения запекаются в файл как есть.
           cat > "package/$PKG/README.txt" <<EOF
-          CSQTT core + TUN adapter для OpenWrt 25.12.5 / Flint 2 (aarch64_generic, musl)
+          CSQTT core + TUN adapter dlya OpenWrt 25.12.5 / Flint 2 (aarch64_generic, musl)
 
-          Источник: https://github.com/${{ env.SOURCE_REPO }}/tree/${REF}
+          Istochnik: https://github.com/${SOURCE_REPO}/tree/${REF}
 
-          Артефакты:
-            csqtt-client        — Rust-ядро (static musl AArch64)
-            csqtt-tun-adapter   — C-хелпер: создаёт csqtt0 и передаёт FD по abstract UDS
+          Artifakty:
+            csqtt-client        - Rust-yadro (static musl AArch64)
+            csqtt-tun-adapter   - C-helper: sozdaet csqtt0 i peredaet FD po abstract UDS
 
-          Быстрый старт (root):
+          Bystryy start (root):
 
-            1) Адаптер (создаёт csqtt0 и отдаёт FD ядру):
+            1) Adapter (sozdaet csqtt0 i otdaet FD yadru):
                  ./csqtt-tun-adapter --interface csqtt0 --uds csqtt-tun-v1 --up &
 
-            2) Ядро (слушает abstract UDS, забирает FD, идёт в TURN/VK):
+            2) Yadro (slushaet abstract UDS, zabiraet FD, idet v TURN/VK):
                  ./csqtt-client --tun-uds csqtt-tun-v1 --peer <host:port> --vk <hash> --password <pass>
 
-            3) Настройка сети (адаптер этого НЕ делает):
+            3) Nastrojka seti (adapter etogo NE delaet):
                  ip addr add <TUNCONF_IP>/32 dev csqtt0
                  ip route add default dev csqtt0 table 32050
                  ip rule add fwmark 0xc5/0xff lookup 32050
                  nft add rule inet fw4 mangle_output meta mark set 0xc5
 
-          Проверка:
+          Proverka:
             ip -4 route get 1.1.1.1 mark 0xc5
             tcpdump -i csqtt0 -n
 
-          Порядок запуска:
-            Адаптер ретраит подключение к UDS до 30 секунд (--timeout).
-            Рекомендуется: ядро первым, потом адаптер.
+          Poryadok zapuska:
+            Adapter retrait podklyuchenie k UDS do 30 sekund (--timeout).
+            Rekomenduetsya: yadro pervym, potom adapter.
           EOF
 
           tar -czf "$PKG.tar.gz" -C package "$PKG"
@@ -340,4 +317,5 @@ jobs:
         with:
           files: |
             ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
-            ${{ env.SOURCE_DIR }
+            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
+          fail_on_unmatched_files: false
