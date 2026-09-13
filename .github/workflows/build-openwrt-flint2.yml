@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
-# Сборка CSQTT-core 2.1.5 (Flint2 fork) под OpenWrt 25.12.5 / aarch64_generic / musl.
+# Сборка CSQTT-core 2.1.5 (Flint2 fork, ветка openwrt-2.0.0) под OpenWrt 25.12.5.
+#
+# Workflow НЕ чекаутит код из текущего репо.
+# Вместо этого он качает zip-архив ветки openwrt-2.0.0 из upstream-репозитория
+# Endlad2/csqtt-core, распаковывает его и выполняет все шаги внутри
+# распакованной директории csqtt-core-openwrt-2.0.0/.
 #
 # Собирает:
 #   - csqtt-client        (Rust, static musl AArch64) — из rust-client/
 #   - csqtt-tun-adapter   (C, static musl AArch64)   — из openwrt/tun-adapter/
-#
-# Оба бинарника собираются ОДНИМ OpenWrt SDK toolchain (gcc-14.3.0, musl),
-# чтобы ABI совпадал. Host glibc toolchain НЕ используется.
 #
 # ВАЖНО (баг actions):
 #   `rustup target add` выполняется В ТОМ ЖЕ JOB, ЧТО И СБОРКА.
@@ -19,11 +21,18 @@ name: build-openwrt-flint2
 on:
   push:
     branches:
+      - main
+      - master
       - openwrt-2.0.0
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Branch/tag/commit of Endlad2/csqtt-core to build"
+        required: false
+        default: "openwrt-2.0.0"
+        type: string
       release_tag:
         description: "Existing tag to attach artifacts to (optional)"
         required: false
@@ -32,6 +41,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+
+  # Источник кода
+  SOURCE_REPO: Endlad2/csqtt-core
+  SOURCE_REF: openwrt-2.0.0
+  # Имя папки после распаковки zip: <repo>-<ref>
+  SOURCE_DIR: csqtt-core-openwrt-2.0.0
 
   # OpenWrt SDK — точная версия из openwrt/download-openwrt-sdk.sh
   SDK_NAME: openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
@@ -47,10 +62,41 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Resolve source ref
+        id: src
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.source_ref || env.SOURCE_REF }}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Building ${{ env.SOURCE_REPO }}@$REF"
+
+      - name: Download and extract source zip
+        run: |
+          set -euo pipefail
+          REF="${{ steps.src.outputs.ref }}"
+          URL="https://github.com/${{ env.SOURCE_REPO }}/archive/refs/heads/$REF.zip"
+
+          echo "Downloading $URL"
+          curl --fail --location --retry 3 --output /tmp/source.zip "$URL" \
+            || {
+              # Если это не ветка (тег или commit) — пробуем refs/tags или refs/heads
+              echo "heads/$REF failed, trying tags/$REF"
+              URL="https://github.com/${{ env.SOURCE_REPO }}/archive/refs/tags/$REF.zip"
+              curl --fail --location --retry 3 --output /tmp/source.zip "$URL"
+            }
+
+          echo "Extracting..."
+          unzip -q /tmp/source.zip -d /tmp/source
+          ls -la /tmp/source/
+
+          # GitHub zip всегда даёт папку <repo>-<ref>
+          EXTRACTED=$(find /tmp/source -mindepth 1 -maxdepth 1 -type d | head -n1)
+          [ -n "$EXTRACTED" ] || { echo "::error::nothing extracted"; exit 1; }
+          echo "Extracted to: $EXTRACTED"
+          echo "SOURCE_DIR=$EXTRACTED" >> "$GITHUB_ENV"
 
       - name: Verify repository layout
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           for path in \
@@ -69,6 +115,7 @@ jobs:
           echo "layout OK"
 
       - name: Make scripts executable
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           chmod +x openwrt/download-openwrt-sdk.sh
@@ -81,23 +128,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang lld build-essential pkg-config \
-            zstd curl file
+            zstd curl unzip file
 
       # --- OpenWrt SDK (кэш + скачивание с проверкой SHA-256) ---------------
+      # Кэш SDK привязываем к конкретному SOURCE_DIR, чтобы SDK_ROOT
+      # случайно не переехал в другую папку.
 
       - name: Cache OpenWrt SDK
         id: cache-sdk
         uses: actions/cache@v4
         with:
-          path: .cache/openwrt-sdk
+          path: ${{ env.SOURCE_DIR }}/.cache/openwrt-sdk
           key: openwrt-sdk-${{ env.SDK_NAME }}-${{ env.SDK_SHA256 }}
           restore-keys: |
             openwrt-sdk-${{ env.SDK_NAME }}-
 
       - name: Download and verify OpenWrt SDK
+        working-directory: ${{ env.SOURCE_DIR }}
         run: ./openwrt/download-openwrt-sdk.sh
 
       - name: Export SDK_ROOT
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           SDK_ROOT="$PWD/.cache/openwrt-sdk/${{ env.SDK_NAME }}"
@@ -122,25 +173,30 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-openwrt-${{ hashFiles('rust-client/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-openwrt-${{ hashFiles(format('{0}/rust-client/Cargo.lock', env.SOURCE_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-cargo-openwrt-
 
       # --- Сборка ----------------------------------------------------------
 
       - name: Build csqtt-tun-adapter (C)
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
+          mkdir -p dist
           ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
 
       - name: Build csqtt-client (Rust)
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
+          mkdir -p dist
           ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
 
       # --- Проверки --------------------------------------------------------
 
       - name: Verify static linkage and print hashes
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           for BIN in dist/csqtt-client dist/csqtt-tun-adapter; do
@@ -154,6 +210,7 @@ jobs:
           done
 
       - name: Compare client hash against FLINT2_BUILD.md reference
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
           ACTUAL=$(sha256sum dist/csqtt-client | awk '{print $1}')
@@ -167,9 +224,11 @@ jobs:
       # --- Упаковка --------------------------------------------------------
 
       - name: Package tarball
+        working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
-          PKG=csqtt-openwrt-25.12.5-aarch64-musl
+          REF="${{ steps.src.outputs.ref }}"
+          PKG="csqtt-openwrt-25.12.5-aarch64-musl-${REF//\//-}"
           mkdir -p "package/$PKG"
 
           cp dist/csqtt-client             "package/$PKG/"
@@ -180,8 +239,10 @@ jobs:
           [ -f openwrt/FLINT2_BUILD.md ]     && cp openwrt/FLINT2_BUILD.md     "package/$PKG/BUILD.md"
           [ -f openwrt/TUN_ADAPTER_PLAN.md ] && cp openwrt/TUN_ADAPTER_PLAN.md "package/$PKG/TUN_ADAPTER_PLAN.md"
 
-          cat > "package/$PKG/README.txt" <<'EOF'
+          cat > "package/$PKG/README.txt" <<EOF
           CSQTT core + TUN adapter для OpenWrt 25.12.5 / Flint 2 (aarch64_generic, musl)
+
+          Источник: https://github.com/${{ env.SOURCE_REPO }}/tree/${REF}
 
           Артефакты:
             csqtt-client        — Rust-ядро (static musl AArch64)
@@ -208,24 +269,23 @@ jobs:
           Порядок запуска:
             Адаптер ретраит подключение к UDS до 30 секунд (--timeout).
             Рекомендуется: ядро первым, потом адаптер.
-
-          Безопасность:
-            Оба процесса работают от root. Адаптер проверяет SO_PEERCRED
-            и принимает FD только от root-owned UDS listener'а.
           EOF
 
           tar -czf "$PKG.tar.gz" -C package "$PKG"
           sha256sum "$PKG.tar.gz" | tee "$PKG.tar.gz.sha256"
           ls -lh "$PKG.tar.gz"
 
+          # Отдаём наверх для следующих шагов
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: csqtt-openwrt-25.12.5-aarch64-musl
           path: |
-            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz
-            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz.sha256
-            dist/*
+            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
+            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
+            ${{ env.SOURCE_DIR }}/dist/*
           if-no-files-found: error
 
       - name: Attach to release (tags only)
@@ -233,6 +293,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz
-            csqtt-openwrt-25.12.5-aarch64-musl.tar.gz.sha256
+            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
+            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
           fail_on_unmatched_files: false
