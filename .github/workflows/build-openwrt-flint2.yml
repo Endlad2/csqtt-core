@@ -1,361 +1,133 @@
-# SPDX-FileCopyrightText: 2026 amurcanov
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-#
-# Сборка CSQTT-core 2.1.5 (Flint2 fork, ветка openwrt-2.0.0) под OpenWrt 25.12.5.
-#
-# Качает zip-архив нужной ветки из Endlad2/csqtt-core, распаковывает
-# и выполняет все шаги внутри распакованной директории.
-#
-# КРИТИЧНО:
-#   1) target ставится под тот же канал, что форсит
-#      rust-client/rust-toolchain.toml (иначе E0463)
-#   2) RUSTUP_TOOLCHAIN выставляется для ВСЕХ шагов сборки,
-#      чтобы rustup не откатывался на default toolchain за пределами
-#      директории rust-client/.
-
-name: build-openwrt-flint2
+name: Build OpenWRT
 
 on:
   push:
     branches:
       - main
-      - master
-      - openwrt-2.0.0
-    tags:
-      - "v*"
+      - release
+    paths:
+      - 'OpenWRT/**'
+      - '.github/workflows/build-openwrt.yml'
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: "Branch/tag/commit of Endlad2/csqtt-core to build"
-        required: false
-        default: "openwrt-2.0.0"
-        type: string
-      release_tag:
-        description: "Existing tag to attach artifacts to (optional)"
-        required: false
-        type: string
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
-  SOURCE_REPO: Endlad2/csqtt-core
-  SOURCE_REF: openwrt-2.0.0
-
-  SDK_NAME: openwrt-sdk-25.12.5-armsr-armv8_gcc-14.3.0_musl.Linux-x86_64
-  SDK_SHA256: 1b0316604a3e820b2b008a1baff3f9dac6716af942bef800930e58c7de98c98b
-
-  RUST_TARGET: aarch64-unknown-linux-musl
-
-  # Дефолт — если toolchain не будет прочитан, всё равно не откатимся на stable
-  RUSTUP_TOOLCHAIN: "1.97.1"
+  OPENWRT_VERSION: "24.10.8"
+  OPENWRT_TARGET: "mediatek/filogic"
+  OPENWRT_ARCH: "aarch64_cortex-a53"
+  RUST_TARGET: "aarch64-unknown-linux-musl"
 
 jobs:
   build:
-    name: openwrt aarch64-musl (client + tun-adapter)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "RouteRich 24.10.8"
+            short_name: "RouteRich"
+
+    name: "OpenWRT - ${{ matrix.name }}"
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Resolve source ref
-        id: src
-        shell: bash
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (toolchain)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
         run: |
-          set -euo pipefail
-          REF="${{ github.event.inputs.source_ref || env.SOURCE_REF }}"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "Building ${{ env.SOURCE_REPO }}@$REF"
-
-      - name: Download and extract source zip
-        shell: bash
-        run: |
-          set -euo pipefail
-          REF="${{ steps.src.outputs.ref }}"
-          URL="https://github.com/${{ env.SOURCE_REPO }}/archive/refs/heads/$REF.zip"
-
-          echo "Downloading $URL"
-          curl --fail --location --retry 3 --output /tmp/source.zip "$URL" \
-            || {
-              echo "heads/$REF failed, trying tags/$REF"
-              URL="https://github.com/${{ env.SOURCE_REPO }}/archive/refs/tags/$REF.zip"
-              curl --fail --location --retry 3 --output /tmp/source.zip "$URL"
-            }
-
-          echo "Extracting..."
-          unzip -q /tmp/source.zip -d /tmp/source
-          EXTRACTED=$(find /tmp/source -mindepth 1 -maxdepth 1 -type d | head -n1)
-          [ -n "$EXTRACTED" ] || { echo "::error::nothing extracted"; exit 1; }
-          echo "Extracted to: $EXTRACTED"
-          echo "SOURCE_DIR=$EXTRACTED" >> "$GITHUB_ENV"
-
-      - name: Verify repository layout
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          for path in \
-            rust-client/Cargo.toml \
-            rust-client/main.rs \
-            openwrt/download-openwrt-sdk.sh \
-            openwrt/build-musl.sh \
-            openwrt/build-tun-adapter.sh \
-            openwrt/tun-adapter/csqtt-tun-adapter.c
-          do
-            if [ ! -e "$path" ]; then
-              echo "::error::missing required file: $path"
-              exit 1
-            fi
-          done
-          echo "layout OK"
-
-      - name: Make scripts executable
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          chmod +x openwrt/download-openwrt-sdk.sh
-          chmod +x openwrt/build-musl.sh
-          chmod +x openwrt/build-tun-adapter.sh
-
-      - name: Install system dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake clang lld build-essential pkg-config \
-            zstd curl unzip file
+          sudo apt-get install -y zstd wget file
 
-      - name: Install rustup
-        shell: bash
+      # Скачиваем OpenWRT toolchain (не SDK — он легче и достаточен).
+      # Внутри: gcc, musl, crt1.o, libc.a под aarch64_cortex-a53.
+      - name: Download OpenWRT toolchain
         run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain stable
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          TOOLCHAIN_BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}"
+          wget -q -O /tmp/index.html "${TOOLCHAIN_BASE}/"
+          TOOLCHAIN_FILE=$(grep -oE 'openwrt-toolchain-[^"]+Linux-x86_64\.tar\.zst' /tmp/index.html | head -n 1)
+          if [ -z "$TOOLCHAIN_FILE" ]; then
+            echo "Toolchain not found. Available files:"
+            grep -oE 'openwrt-[^"]+' /tmp/index.html | head
+            exit 1
           fi
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup --version
-          cargo --version
+          echo "Downloading $TOOLCHAIN_FILE"
+          wget -q "${TOOLCHAIN_BASE}/${TOOLCHAIN_FILE}" -O /tmp/toolchain.tar.zst
+          mkdir -p /opt/openwrt-toolchain
+          tar --use-compress-program=unzstd -xf /tmp/toolchain.tar.zst -C /opt/openwrt-toolchain
+          TOOLCHAIN_DIR=$(find /opt/openwrt-toolchain -maxdepth 1 -type d -name 'toolchain-*' | head -n 1)
+          echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" >> $GITHUB_ENV
+          echo "Toolchain extracted to $TOOLCHAIN_DIR"
+          ls -la "$TOOLCHAIN_DIR/bin/" | head
 
-      - name: Read toolchain channel from rust-toolchain.toml
-        id: toolchain
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}/rust-client
+      # Проверяем, что компилятор работает и определяем его полный путь.
+      - name: Locate cross-compiler
         run: |
-          set -euo pipefail
-          if [ -f rust-toolchain.toml ]; then
-            CHANNEL=$(grep -E '^[[:space:]]*channel[[:space:]]*=' rust-toolchain.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
-          else
-            CHANNEL="stable"
+          CC="$TOOLCHAIN_DIR/bin/aarch64-openwrt-linux-musl-gcc"
+          if [ ! -x "$CC" ]; then
+            echo "Cross-compiler not found at $CC"
+            find "$TOOLCHAIN_DIR" -name '*openwrt*gcc*' -type f | head
+            exit 1
           fi
-          [ -n "$CHANNEL" ] || CHANNEL="stable"
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-          echo "Detected toolchain channel: $CHANNEL"
-          # Экспортируем в GITHUB_ENV, чтобы было видно во ВСЕХ последующих шагах
-          echo "RUSTUP_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "CC_PATH=$TOOLCHAIN_DIR/bin" >> $GITHUB_ENV
+          "$CC" --version
 
-      # --- ЕДИНСТВЕННЫЙ шаг где ставим toolchain и target ---
-      # ВАЖНО: после этого шага НИКОГДА не вызывать `rustup toolchain install`
-      # с другим каналом, и НИКОГДА не заходить в директорию без
-      # rust-toolchain.toml без явного RUSTUP_TOOLCHAIN.
-
-      - name: Install Rust toolchain channel and musl target
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}/rust-client
+      - name: Configure Cargo linker
+        working-directory: OpenWRT
         run: |
-          set -euo pipefail
-          CHANNEL="${{ steps.toolchain.outputs.channel }}"
-
-          echo "==> Installing toolchain: $CHANNEL"
-          rustup toolchain install "$CHANNEL" --profile minimal
-
-          echo "==> Adding target ${{ env.RUST_TARGET }} to $CHANNEL"
-          rustup target add "${{ env.RUST_TARGET }}" --toolchain "$CHANNEL"
-
-          echo "==> rustup show"
-          rustup show
-
-          echo "==> Targets for $CHANNEL:"
-          rustup target list --installed --toolchain "$CHANNEL" | tee /tmp/installed_targets.txt
-          grep -Fx "${{ env.RUST_TARGET }}" /tmp/installed_targets.txt \
-            || { echo "::error::target not installed for channel $CHANNEL"; exit 1; }
-
-          # --- PROBE: только теперь, с явным RUSTUP_TOOLCHAIN ---
-          # Раньше probe падал потому что в /tmp нет rust-toolchain.toml,
-          # и rustup брал default stable без musl target.
-          # Теперь RUSTUP_TOOLCHAIN уже в GITHUB_ENV и виден здесь.
-          echo "==> Probe build in /tmp with RUSTUP_TOOLCHAIN=$CHANNEL"
-          cd /tmp
-          rm -rf probe-target
-          cargo new --bin probe-target >/dev/null
-          cd probe-target
-
-          # Явно и на всякий случай — даже если GITHUB_ENV ещё не подхватился
-          RUSTUP_TOOLCHAIN="$CHANNEL" cargo build --target "${{ env.RUST_TARGET }}" -v 2>&1 | tail -20
-
-          echo "probe build OK"
-
-      - name: Cache OpenWrt SDK
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.SOURCE_DIR }}/.cache/openwrt-sdk
-          key: openwrt-sdk-${{ env.SDK_NAME }}-${{ env.SDK_SHA256 }}
-          restore-keys: |
-            openwrt-sdk-${{ env.SDK_NAME }}-
-
-      - name: Download and verify OpenWrt SDK
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: ./openwrt/download-openwrt-sdk.sh
-
-      - name: Export SDK_ROOT
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          SDK_ROOT="$PWD/.cache/openwrt-sdk/${{ env.SDK_NAME }}"
-          COMPILER="$SDK_ROOT/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl/bin/aarch64-openwrt-linux-musl-gcc"
-          [ -x "$COMPILER" ] || { echo "::error::SDK toolchain missing: $COMPILER"; exit 1; }
-          "$COMPILER" --version
-          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-openwrt-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-openwrt-
-
-      - name: Build csqtt-tun-adapter (C)
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          ./openwrt/build-tun-adapter.sh "$PWD/dist/csqtt-tun-adapter"
-
-      # --- ГЛАВНЫЙ ШАГ: сборка ядра ---
-      # RUSTUP_TOOLCHAIN уже в env из шага "Read toolchain channel",
-      # поэтому cargo гарантированно возьмёт правильный канал,
-      # даже находясь в rust-client/ где есть rust-toolchain.toml.
-      - name: Build csqtt-client (Rust)
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN"
-          rustup show
-          rustup target list --installed | grep -Fx "${{ env.RUST_TARGET }}" \
-            || { echo "::error::target not visible for $RUSTUP_TOOLCHAIN"; exit 1; }
-
-          mkdir -p dist
-          ./openwrt/build-musl.sh "$PWD/dist/csqtt-client"
-
-      - name: Verify static linkage and print hashes
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          for BIN in dist/csqtt-client dist/csqtt-tun-adapter; do
-            echo "=== $BIN ==="
-            file "$BIN"
-            if file "$BIN" | grep -qi 'dynamically linked'; then
-              echo "::error::$BIN is dynamically linked; expected static musl"
-              exit 1
-            fi
-            sha256sum "$BIN" | tee "$BIN.sha256"
-          done
-
-      - name: Compare client hash against FLINT2_BUILD.md reference
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-          ACTUAL=$(sha256sum dist/csqtt-client | awk '{print $1}')
-          EXPECTED="387338f1bbf6e6f3d4d95b9512fadd1633441a37aa324e9435578e3759bf5b9c"
-          if [ "$ACTUAL" = "$EXPECTED" ]; then
-            echo "csqtt-client hash matches FLINT2_BUILD.md reference (OK)"
-          else
-            echo "::warning::csqtt-client hash $ACTUAL differs from reference $EXPECTED"
-          fi
-
-      - name: Package tarball
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        env:
-          SOURCE_REPO_ENV: ${{ env.SOURCE_REPO }}
-          SOURCE_REF_ENV: ${{ steps.src.outputs.ref }}
-        run: |
-          set -euo pipefail
-          PKG="csqtt-openwrt-25.12.5-aarch64-musl-${SOURCE_REF_ENV//\//-}"
-          mkdir -p "package/$PKG"
-
-          cp dist/csqtt-client             "package/$PKG/"
-          cp dist/csqtt-tun-adapter        "package/$PKG/"
-          cp dist/csqtt-client.sha256      "package/$PKG/"
-          cp dist/csqtt-tun-adapter.sha256 "package/$PKG/"
-
-          [ -f openwrt/FLINT2_BUILD.md ]     && cp openwrt/FLINT2_BUILD.md     "package/$PKG/BUILD.md"
-          [ -f openwrt/TUN_ADAPTER_PLAN.md ] && cp openwrt/TUN_ADAPTER_PLAN.md "package/$PKG/TUN_ADAPTER_PLAN.md"
-
-          cat > "package/$PKG/README.txt" <<EOF
-          CSQTT core + TUN adapter for OpenWrt 25.12.5 / Flint 2 (aarch64_generic, musl)
-
-          Source: https://github.com/${SOURCE_REPO_ENV}/tree/${SOURCE_REF_ENV}
-
-          Artifacts:
-            csqtt-client        - Rust core (static musl AArch64)
-            csqtt-tun-adapter   - C helper: creates csqtt0 and passes FD over abstract UDS
-
-          Quick start (root):
-
-            1) Adapter (creates csqtt0 and passes FD to the core):
-                 ./csqtt-tun-adapter --interface csqtt0 --uds csqtt-tun-v1 --up &
-
-            2) Core (listens on abstract UDS, takes FD, connects to TURN/VK):
-                 ./csqtt-client --tun-uds csqtt-tun-v1 --peer <host:port> --vk <hash> --password <pass>
-
-            3) Network setup (adapter does NOT do this):
-                 ip addr add <TUNCONF_IP>/32 dev csqtt0
-                 ip route add default dev csqtt0 table 32050
-                 ip rule add fwmark 0xc5/0xff lookup 32050
-                 nft add rule inet fw4 mangle_output meta mark set 0xc5
-
-          Check:
-            ip -4 route get 1.1.1.1 mark 0xc5
-            tcpdump -i csqtt0 -n
-
-          Startup order:
-            Adapter retries UDS connect for up to 30 seconds (--timeout).
-            Recommended: core first, then adapter.
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [target.${RUST_TARGET}]
+          linker = "${TOOLCHAIN_DIR}/bin/aarch64-openwrt-linux-musl-gcc"
+          ar = "${TOOLCHAIN_DIR}/bin/aarch64-openwrt-linux-musl-ar"
           EOF
+          echo "=== .cargo/config.toml ==="
+          cat .cargo/config.toml
 
-          tar -czf "$PKG.tar.gz" -C package "$PKG"
-          sha256sum "$PKG.tar.gz" | tee "$PKG.tar.gz.sha256"
-          ls -lh "$PKG.tar.gz"
+      - name: Add Rust target
+        run: rustup target add ${RUST_TARGET}
 
-          echo "PKG=$PKG" >> "$GITHUB_ENV"
+      - name: Build owrt-client
+        working-directory: OpenWRT
+        env:
+          # OpenWRT musl-toolchain ищет свой sysroot по этим переменным.
+          # Без них ld не найдёт libc.a и crt1.o.
+          PATH: ${{ env.CC_PATH }}:${{ env.PATH }}
+          CC_aarch64_unknown_linux_musl: ${{ env.CC }}
+          AR_aarch64_unknown_linux_musl: ${{ env.TOOLCHAIN_DIR }}/bin/aarch64-openwrt-linux-musl-ar
+          CFLAGS_aarch64_unknown_linux_musl: "-I${{ env.TOOLCHAIN_DIR }}/include"
+          RUSTFLAGS: "-C link-arg=-static -C link-arg=-L${{ env.TOOLCHAIN_DIR }}/lib"
+        run: |
+          cargo build --release --target ${RUST_TARGET} --verbose
+          ls -la target/${RUST_TARGET}/release/
 
-      - name: Upload artifact
+      - name: Verify binary
+        working-directory: OpenWRT
+        run: |
+          BIN="target/${RUST_TARGET}/release/owrt-client"
+          file "$BIN"
+          file "$BIN" | grep -q "ARM aarch64" || { echo "Not ARM64!"; exit 1; }
+          # Проверим, что это статический musl-бинарь
+          "$CC" -print-file-name=libc.a >/dev/null
+          echo "=== ldd (должен быть not a dynamic executable) ==="
+          ldd "$BIN" || true
+
+      - name: Prepare package
+        working-directory: OpenWRT
+        run: |
+          BIN="target/${RUST_TARGET}/release/owrt-client"
+          OUT="/tmp/owrt-client-${{ matrix.short_name }}"
+          mkdir -p "$OUT"
+          cp "$BIN" "$OUT/owrt-client"
+          cp README.md "$OUT/README.md"
+          printf '%s\n' '# Скопируй в файл config (без .example) рядом с бинарником.' 'csqtt://connect?v=2&host=31.77.148.203&peer=46000&password=ЗАМЕНИ&hashes=hash1+hash2+hash3' > "$OUT/config.example"
+          ls -la "$OUT"
+
+      - name: Upload OpenWRT Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: csqtt-openwrt-25.12.5-aarch64-musl
-          path: |
-            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
-            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
-            ${{ env.SOURCE_DIR }}/dist/*
+          name: LaLune-OpenWRT-${{ matrix.short_name }}
+          path: /tmp/owrt-client-${{ matrix.short_name }}/
           if-no-files-found: error
-
-      - name: Attach to release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz
-            ${{ env.SOURCE_DIR }}/${{ env.PKG }}.tar.gz.sha256
-          fail_on_unmatched_files: false
