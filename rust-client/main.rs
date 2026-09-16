@@ -118,6 +118,11 @@ struct Arguments {
     tun_uds: String,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
+    /// VK access token (optional). When set, it is used directly as the
+    /// Auto JS bootstrap token, so no `VK_JS_BOOTSTRAP:` line needs to be
+    /// piped through stdin.
+    #[arg(long, default_value = "")]
+    token: String,
 }
 
 fn main() {
@@ -188,7 +193,7 @@ async fn run(arguments: Arguments) -> Result<()> {
     let mut js_calls = None;
     let mut js_credential_broker = None;
     let hash_source = if js_hash_mode {
-        let bootstrap = read_vk_js_bootstrap().await?;
+        let bootstrap = read_vk_js_bootstrap(&arguments.token).await?;
         let started = vk_js_calls::start(
             bootstrap,
             &arguments.device_id,
@@ -478,6 +483,7 @@ fn normalize_cli_argument(argument: String) -> String {
         "tun-uds",
         "allow-hash-redistribution",
         "validate-vk-hashes",
+        "token",
     ];
     if let Some(value) = argument.strip_prefix('-') {
         let name = value.split('=').next().unwrap_or(value);
@@ -488,7 +494,12 @@ fn normalize_cli_argument(argument: String) -> String {
     argument
 }
 
-async fn read_vk_js_bootstrap() -> Result<vk_js_calls::Bootstrap> {
+async fn read_vk_js_bootstrap(token_argument: &str) -> Result<vk_js_calls::Bootstrap> {
+    if !token_argument.trim().is_empty() {
+        return Ok(vk_js_calls::Bootstrap {
+            token: token_argument.trim().to_owned(),
+        });
+    }
     let mut line = String::new();
     tokio::time::timeout(
         Duration::from_secs(15),
@@ -678,6 +689,14 @@ fn print_configuration(
     );
     crate::log_error!("[WRAP] WRAP Ключ вычислен ✓");
     crate::log_error!("[КЛИЕНТ] Device ID: {}", arguments.device_id);
+    if arguments.vk_hash_mode == "auto_js" {
+        let source = if arguments.token.trim().is_empty() {
+            "stdin"
+        } else {
+            "--token"
+        };
+        crate::log_error!("[КЛИЕНТ] VK Token: предоставлен ({source})");
+    }
     crate::log_error!("[КЛИЕНТ] Captcha: {captcha}");
     crate::log_error!("[КЛИЕНТ] ═══════════════════════════════════════");
 }
@@ -800,6 +819,36 @@ mod worker_count_tests {
         .unwrap();
         assert_eq!(arguments.vk, "-Wabc,-Wdef");
         assert!(arguments.allow_hash_redistribution);
+    }
+
+    #[test]
+    fn token_argument_accepts_an_access_token() {
+        let arguments = Arguments::try_parse_from([
+            "csqtt-client",
+            "--vk-hash-mode",
+            "auto_js",
+            "--vk-auth-mode",
+            "auto_js",
+            "--peer",
+            "127.0.0.1:9000",
+            "--password",
+            "secret",
+            "--token",
+            "vk1.a.ABCdef",
+        ])
+        .unwrap();
+        assert_eq!(arguments.token, "vk1.a.ABCdef");
+    }
+
+    #[test]
+    fn android_single_dash_token_flag_is_rewritten() {
+        assert_eq!(normalize_cli_argument("-token".to_owned()), "--token");
+    }
+
+    #[tokio::test]
+    async fn token_argument_bypasses_stdin_bootstrap() {
+        let bootstrap = read_vk_js_bootstrap("vk1.a.token").await.unwrap();
+        assert_eq!(bootstrap.token, "vk1.a.token");
     }
 
     #[tokio::test]
