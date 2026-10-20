@@ -176,12 +176,13 @@ impl CsqttConfig {
         let mut args = Vec::new();
         args.push(format!("--peer={}", self.peer));
         args.push(format!("--vk={}", self.vk));
-        args.push(format!("--password={}", self.password));
+        // --password: после возврата флага в rust-client/main.rs пароль
+        // передаётся через CLI (приоритет над env CSQTT_PASSWORD).
+        if !self.password.is_empty() {
+            args.push(format!("--password={}", self.password));
+        }
         args.push(format!("--listen={}", self.listen));
         args.push(format!("--workers={}", self.workers));
-        if !self.device_id.is_empty() && self.device_id != "unknown" {
-            args.push(format!("--device-id={}", self.device_id));
-        }
         if !self.vk_hash_mode.is_empty() && self.vk_hash_mode != "manual" {
             args.push(format!("--vk-hash-mode={}", self.vk_hash_mode));
         }
@@ -221,9 +222,6 @@ impl CsqttConfig {
         if !self.port.is_empty() {
             args.push(format!("--port={}", self.port));
         }
-        if self.allow_hash_redistribution {
-            args.push("--allow-hash-redistribution".to_string());
-        }
         if self.validate_vk_hashes {
             args.push("--validate-vk-hashes".to_string());
         }
@@ -257,6 +255,8 @@ impl CsqttConfig {
         if self.exact_workers {
             args.push("--exact-workers".to_string());
         }
+        // NB: --device-id и --allow-hash-redistribution в rust-client 2.5.0
+        // больше не существуют как CLI-флаги, поэтому в args не кладём.
         args
     }
 }
