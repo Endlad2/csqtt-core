@@ -23,7 +23,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   WORKING_DIR: rust-client
-  IOS_WORKING_DIR: rust-client/ios-core
+  # ios-core лежит РЯДОМ с rust-client (csqtt-core/ios-core), shared/ тоже рядом.
+  # Поэтому сборка идёт прямо из ios-core, а patch-пути в его Cargo.toml —
+  # ../rust-client/vendor/... и ../shared/... — резолвятся корректно.
+  IOS_WORKING_DIR: ios-core
   NDK_VERSION: r26d
   ANDROID_PLATFORM: 26
 
@@ -37,10 +40,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
 
       - name: Cache cargo registry
@@ -57,6 +58,33 @@ jobs:
         run: cargo check --release
         working-directory: ${{ env.WORKING_DIR }}
 
+  # ============= CHECK ios-core =============
+  check-ios-core:
+    name: Check ios-core (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-ios-core-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-ios-core-
+      - name: Cargo check (ios-core staticlib)
+        run: cargo check --release
+        working-directory: ${{ env.IOS_WORKING_DIR }}
+
   # ============= LINUX x86_64 =============
   build-linux:
     name: Linux x86_64
@@ -67,11 +95,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: x86_64-unknown-linux-gnu
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -84,9 +111,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-linux-
       - name: Build
-        run: |
-          rustup target add x86_64-unknown-linux-gnu
-          cargo build --release --target x86_64-unknown-linux-gnu
+        run: cargo build --release --target x86_64-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -105,11 +130,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: aarch64-unknown-linux-gnu
 
       - name: Install cross-compilation dependencies
         run: |
@@ -131,9 +155,7 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
       - name: Build
-        run: |
-          rustup target add aarch64-unknown-linux-gnu
-          cargo build --release --target aarch64-unknown-linux-gnu
+        run: cargo build --release --target aarch64-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -152,11 +174,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: armv7-unknown-linux-gnueabihf
 
       - name: Install cross-compilation dependencies
         run: |
@@ -178,9 +199,7 @@ jobs:
           echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
           echo "CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
       - name: Build
-        run: |
-          rustup target add armv7-unknown-linux-gnueabihf
-          cargo build --release --target armv7-unknown-linux-gnueabihf
+        run: cargo build --release --target armv7-unknown-linux-gnueabihf
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -199,11 +218,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: i686-unknown-linux-gnu
 
       - name: Install cross-compilation dependencies
         run: |
@@ -225,9 +243,7 @@ jobs:
           echo "CC_i686_unknown_linux_gnu=gcc" >> $GITHUB_ENV
           echo "CXX_i686_unknown_linux_gnu=g++" >> $GITHUB_ENV
       - name: Build
-        run: |
-          rustup target add i686-unknown-linux-gnu
-          cargo build --release --target i686-unknown-linux-gnu
+        run: cargo build --release --target i686-unknown-linux-gnu
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -246,11 +262,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -263,9 +278,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-windows-
       - name: Build
-        run: |
-          rustup target add x86_64-pc-windows-msvc
-          cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target x86_64-pc-windows-msvc
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -284,11 +297,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: x86_64-apple-darwin
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -301,9 +313,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-macos-
       - name: Build
-        run: |
-          rustup target add x86_64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --target x86_64-apple-darwin
         working-directory: ${{ env.WORKING_DIR }}
 
       - name: Upload artifacts
@@ -322,12 +332,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
-          target: aarch64-linux-android
+          targets: aarch64-linux-android
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -376,12 +384,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
-          target: armv7-linux-androideabi
+          targets: armv7-linux-androideabi
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -430,12 +436,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
-          target: x86_64-linux-android
+          targets: x86_64-linux-android
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -474,7 +478,10 @@ jobs:
           name: android-x86_64
           path: android-libs/x86_64/libclient.so
 
-  # ============= iOS SIMULATOR (x86_64) - ИЗ ios-core =============
+  # ============= iOS SIMULATOR (x86_64) =============
+  # Собираем ios-core НА ЕГО МЕСТЕ (csqtt-core/ios-core), без копирования в rust-client.
+  # Patch-пути в ios-core/Cargo.toml (../rust-client/vendor/...) из ios-core/ резолвятся
+  # в csqtt-core/rust-client/vendor/... — это правильно.
   build-ios-simulator:
     name: iOS Simulator (x86_64) - staticlib
     runs-on: macos-latest
@@ -483,16 +490,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy ios-core to rust-client
-        run: |
-          mkdir -p rust-client
-          cp -r ios-core rust-client/
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: x86_64-apple-ios
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -505,9 +507,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ios-sim-
       - name: Build for iOS Simulator
-        run: |
-          rustup target add x86_64-apple-ios
-          cargo build --release --target x86_64-apple-ios
+        run: cargo build --release --target x86_64-apple-ios
         working-directory: ${{ env.IOS_WORKING_DIR }}
 
       - name: Upload artifacts
@@ -516,7 +516,7 @@ jobs:
           name: libcsqtt_ios_simulator_x86_64
           path: ${{ env.IOS_WORKING_DIR }}/target/x86_64-apple-ios/release/libcsqtt_ios_core.a
 
-  # ============= iOS DEVICE (aarch64) - ИЗ ios-core =============
+  # ============= iOS DEVICE (aarch64) =============
   build-ios-device:
     name: iOS Device (aarch64) - staticlib
     runs-on: macos-latest
@@ -525,16 +525,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy ios-core to rust-client
-        run: |
-          mkdir -p rust-client
-          cp -r ios-core rust-client/
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           profile: minimal
+          targets: aarch64-apple-ios
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -547,9 +542,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ios-dev-
       - name: Build for iOS Device
-        run: |
-          rustup target add aarch64-apple-ios
-          cargo build --release --target aarch64-apple-ios
+        run: cargo build --release --target aarch64-apple-ios
         working-directory: ${{ env.IOS_WORKING_DIR }}
 
       - name: Upload artifacts
@@ -621,7 +614,7 @@ jobs:
           echo "RELEASE_TAG=$(date +'%Y.%m.%d.%H.%M')" >> $GITHUB_OUTPUT
       - name: Create GitHub Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_tag.outputs.RELEASE_TAG }}
           name: Release ${{ steps.get_tag.outputs.RELEASE_TAG }}
@@ -647,18 +640,16 @@ jobs:
           cp artifacts/client-windows-x86_64/client.exe release-assets/client-windows-x86_64.exe
           cp artifacts/client-macos-x86_64/client release-assets/client-macos-x86_64
           cp artifacts/libcsqtt_ios_universal/libcsqtt_ios_core.a release-assets/libcsqtt_ios_core.a
-
           cp artifacts/android-arm64-v8a/libclient.so release-assets/libclient-android-arm64-v8a.so
           cp artifacts/android-armeabi-v7a/libclient.so release-assets/libclient-android-armeabi-v7a.so
           cp artifacts/android-x86_64/libclient.so release-assets/libclient-android-x86_64.so
-
           chmod +x release-assets/client-linux-x86_64 || true
           chmod +x release-assets/client-linux-arm64 || true
           chmod +x release-assets/client-linux-armv7 || true
           chmod +x release-assets/client-linux-i686 || true
           chmod +x release-assets/client-macos-x86_64 || true
       - name: Upload assets to release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_tag.outputs.RELEASE_TAG }}
           files: release-assets/*
