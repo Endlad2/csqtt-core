@@ -1,68 +1,82 @@
 // ios-core/lib.rs
+//
+// iOS static library crate root.
+// Модули подключаются напрямую из rust-client/ и shared/ через #[path].
+// Пути считаются ОТ ЭТОГО ФАЙЛА (ios-core/lib.rs):
+//   ../rust-client/*.rs  ->  csqtt-core/rust-client/*.rs
+//   ../shared/*.rs       ->  csqtt-core/shared/*.rs
+//
+// ВАЖНО: dtls, spsc_ring и wire_protocol должны быть на crate-корне,
+// потому что dispatcher.rs/session.rs/turn.rs/obfs.rs ссылаются на них
+// как crate::wire_protocol, crate::spsc_ring, crate::dtls.
 #![allow(dead_code, unused_imports)]
 
-// Shared modules from ../../shared/
-mod shared;
-use shared::*;
+// ----- shared/ (crate-level modules) -----
+#[path = "../shared/dtls.rs"]
+pub mod dtls;
+#[path = "../shared/spsc_ring.rs"]
+pub mod spsc_ring;
+#[path = "../shared/wire_protocol.rs"]
+pub mod wire_protocol;
 
-// Импортируем модули из папки rust-client (../)
-#[path = "../auth.rs"]
+// ----- rust-client/ (crate-level modules) -----
+#[path = "../rust-client/auth.rs"]
 mod auth;
-#[path = "../captcha.rs"]
+#[path = "../rust-client/captcha.rs"]
 mod captcha;
-#[path = "../captcha_slider.rs"]
+#[path = "../rust-client/captcha_slider.rs"]
 mod captcha_slider;
-#[path = "../client_perf.rs"]
-mod client_perf;
-#[path = "../cpu_task.rs"]
+#[path = "../rust-client/cpu_task.rs"]
 mod cpu_task;
-#[path = "../dispatcher.rs"]
+#[path = "../rust-client/direct_relay.rs"]
+pub mod direct_relay;
+#[path = "../rust-client/dispatcher.rs"]
 mod dispatcher;
-#[path = "../dns.rs"]
+#[path = "../rust-client/dns.rs"]
 mod dns;
-#[path = "../events.rs"]
+#[path = "../rust-client/events.rs"]
 mod events;
-#[path = "../../shared/selective_fec.rs"]
-mod selective_fec;
-#[path = "../logging.rs"]
+#[path = "../rust-client/logging.rs"]
 mod logging;
-#[path = "../namegen.rs"]
+#[path = "../rust-client/namegen.rs"]
 mod namegen;
-#[path = "../obfs.rs"]
+#[path = "../rust-client/obfs.rs"]
 mod obfs;
-#[path = "../packet.rs"]
+#[path = "../rust-client/packet.rs"]
 mod packet;
-#[path = "../profiles.rs"]
+#[path = "../rust-client/profiles.rs"]
 mod profiles;
-#[path = "../protocol.rs"]
+#[path = "../rust-client/protocol.rs"]
 mod protocol;
-#[path = "../repair.rs"]
+#[path = "../rust-client/repair.rs"]
 mod repair;
-#[path = "../session.rs"]
+#[path = "../rust-client/session.rs"]
 mod session;
-#[path = "../stats.rs"]
+#[path = "../rust-client/sni.rs"]
+mod sni;
+#[path = "../rust-client/srtp_mode.rs"]
+mod srtp_mode;
+#[path = "../rust-client/stats.rs"]
 mod stats;
-#[path = "../../shared/striped_scheduler.rs"]
-mod striped_scheduler;
-#[path = "../stun_codec.rs"]
+#[path = "../rust-client/stun_codec.rs"]
 mod stun_codec;
-#[path = "../tun.rs"]
+#[path = "../rust-client/tun.rs"]
 mod tun;
-#[path = "../turn.rs"]
+#[path = "../rust-client/turn.rs"]
 mod turn;
-#[path = "../turn_core.rs"]
+#[path = "../rust-client/turn_core.rs"]
 mod turn_core;
-#[path = "../turn_endpoint.rs"]
+#[path = "../rust-client/turn_endpoint.rs"]
 mod turn_endpoint;
-#[path = "../turn_stream.rs"]
+#[path = "../rust-client/turn_ip_pool.rs"]
+mod turn_ip_pool;
+#[path = "../rust-client/turn_stream.rs"]
 mod turn_stream;
-#[path = "../udp_batch.rs"]
-mod udp_batch;
-#[path = "../vk_js_calls.rs"]
+#[path = "../rust-client/vk_js_calls.rs"]
 mod vk_js_calls;
-#[path = "../worker.rs"]
+#[path = "../rust-client/worker.rs"]
 mod worker;
-#[path = "../wrap.rs"]
+#[path = "../rust-client/wrap.rs"]
 mod wrap;
 
 use std::ffi::{CStr, CString};
@@ -137,13 +151,24 @@ pub struct CsqttConfig {
     pub client_ids: String,
     pub obfs: String,
     pub turn_transport: String,
+    pub srtp_mode: String,
     pub generation: u64,
     pub salt: String,
     pub turn: String,
+    pub custom_turn_ips: String,
     pub port: String,
     pub allow_hash_redistribution: bool,
     pub validate_vk_hashes: bool,
     pub tun_uds: String,
+    pub domain_routing: bool,
+    pub exclude_ru_zones: bool,
+    pub template_domains: bool,
+    pub domain_whitelist: bool,
+    pub direct_domains: String,
+    pub ip_routing: bool,
+    pub ip_whitelist: bool,
+    pub direct_ips: String,
+    pub exact_workers: bool,
 }
 
 impl CsqttConfig {
@@ -178,6 +203,9 @@ impl CsqttConfig {
         if !self.turn_transport.is_empty() && self.turn_transport != "udp" {
             args.push(format!("--turn-transport={}", self.turn_transport));
         }
+        if !self.srtp_mode.is_empty() && self.srtp_mode != "auto" {
+            args.push(format!("--srtp-mode={}", self.srtp_mode));
+        }
         if self.generation != 0 {
             args.push(format!("--gen={}", self.generation));
         }
@@ -186,6 +214,9 @@ impl CsqttConfig {
         }
         if !self.turn.is_empty() {
             args.push(format!("--turn={}", self.turn));
+        }
+        if !self.custom_turn_ips.is_empty() {
+            args.push(format!("--custom-turn-ips={}", self.custom_turn_ips));
         }
         if !self.port.is_empty() {
             args.push(format!("--port={}", self.port));
@@ -199,11 +230,48 @@ impl CsqttConfig {
         if !self.tun_uds.is_empty() {
             args.push(format!("--tun-uds={}", self.tun_uds));
         }
+        if self.domain_routing {
+            args.push("--domain-routing".to_string());
+        }
+        if self.exclude_ru_zones {
+            args.push("--exclude-ru-zones".to_string());
+        }
+        if self.template_domains {
+            args.push("--template-domains".to_string());
+        }
+        if self.domain_whitelist {
+            args.push("--domain-whitelist".to_string());
+        }
+        if !self.direct_domains.is_empty() {
+            args.push(format!("--direct-domains={}", self.direct_domains));
+        }
+        if self.ip_routing {
+            args.push("--ip-routing".to_string());
+        }
+        if self.ip_whitelist {
+            args.push("--ip-whitelist".to_string());
+        }
+        if !self.direct_ips.is_empty() {
+            args.push(format!("--direct-ips={}", self.direct_ips));
+        }
+        if self.exact_workers {
+            args.push("--exact-workers".to_string());
+        }
         args
     }
 }
 
 // ===== Основная логика (скопирована из main.rs) =====
+
+const MAX_WORKERS: usize = 100;
+
+fn normalize_worker_count(requested: usize) -> usize {
+    if requested <= 5 {
+        return 5;
+    }
+    requested.clamp(worker::WORKERS_PER_GROUP, MAX_WORKERS) / worker::WORKERS_PER_GROUP
+        * worker::WORKERS_PER_GROUP
+}
 
 async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     use auth::VkAuth;
@@ -214,9 +282,11 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     use packet::{PacketPool, packet_pool_size};
     use repair::RepairState;
     use session::ShutdownCoordinator;
+    use srtp_mode::SrtpMode;
     use stats::Stats;
     use tokio_util::sync::CancellationToken;
     use turn_endpoint::TurnTransportMode;
+    use turn_ip_pool::{TurnIpPool, parse_custom_turn_ips};
     use worker::{
         GroupContext, PauseGate, RuntimeParams, WORKER_START_INTERVAL,
         WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
@@ -226,24 +296,30 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     let peer = crate::dns::resolve_socket(&config.peer).await?;
     let mode = ObfsMode::parse(&config.obfs)?;
     let turn_transport = TurnTransportMode::parse(&config.turn_transport)?;
+    let srtp_mode = SrtpMode::parse(&config.srtp_mode)?;
     let wrap_key = derive_wrap_key(&config.password)?;
+    let client_wrap_key = wrap_key;
     let session_profile = profiles::random_profile(&config.fingerprint);
 
     let hashes: Vec<_> = parse_hashes(&config.vk)
         .into_iter()
         .take(6)
         .collect();
-    
+
     if hashes.is_empty() {
         anyhow::bail!("[КЛИЕНТ] Нет хешей VK");
     }
 
-    let workers = config.workers as usize;
-    let groups = workers / WORKERS_PER_GROUP;
+    let workers = if config.exact_workers {
+        (config.workers as usize).clamp(3, MAX_WORKERS)
+    } else {
+        normalize_worker_count(config.workers as usize)
+    };
+    let groups = workers.div_ceil(WORKERS_PER_GROUP);
     let cancel = CancellationToken::new();
     let captcha = CaptchaSolver::new(&config.captcha_mode, cancel.clone());
     let events = Events::from_env();
-    
+
     let client_ids: Vec<_> = config.client_ids
         .split(',')
         .map(str::trim)
@@ -261,37 +337,87 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
 
     let stats = std::sync::Arc::new(Stats::default());
     let paused = std::sync::Arc::new(PauseGate::new());
-    let pool = PacketPool::new(packet_pool_size(workers));
-    
-    let (dispatcher, local_port) = Dispatcher::start(
+    let pool = PacketPool::new(packet_pool_size(MAX_WORKERS));
+
+    let tun_uds = (!config.tun_uds.is_empty()).then_some(config.tun_uds.clone());
+    let mut direct_domains = crate::sni::parse_direct_domains(&config.direct_domains);
+    direct_domains.truncate(1024);
+    let ip_rules = crate::sni::parse_ip_rules(&config.direct_ips);
+    let domain_routing = dispatcher::DomainRoutingConfig {
+        enabled: config.domain_routing,
+        exclude_ru_zones: config.exclude_ru_zones,
+        template_domains: config.template_domains,
+        direct_domains: std::sync::Arc::new(direct_domains),
+        is_whitelist: config.domain_whitelist,
+        ip_routing_enabled: config.ip_routing,
+        ip_is_whitelist: config.ip_whitelist,
+        ip_rules: std::sync::Arc::new(ip_rules),
+    };
+
+    let (dispatcher, local_port) = Dispatcher::start_with_domain_routing(
         &config.listen,
-        None,
+        tun_uds,
         pool.clone(),
         stats.clone(),
         cancel.clone(),
+        domain_routing,
+        workers,
     ).await?;
 
     let local_port: std::sync::Arc<str> = std::sync::Arc::from(local_port);
-    
+
+    let raw_turn_ips = if !config.custom_turn_ips.is_empty() {
+        &config.custom_turn_ips
+    } else {
+        &config.turn
+    };
+    let turn_ip_pool = std::sync::Arc::new(TurnIpPool::new(
+        parse_custom_turn_ips(raw_turn_ips),
+        MAX_WORKERS,
+    ));
+
+    let params_workers = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(workers));
+    let scale_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let params = std::sync::Arc::new(RuntimeParams {
         peer,
         turn_host: (!config.turn.is_empty()).then(|| std::sync::Arc::from(config.turn.as_str())),
         turn_port: (!config.port.is_empty()).then(|| std::sync::Arc::from(config.port.as_str())),
+        turn_ip_pool,
         turn_transport,
+        srtp_mode,
         hashes: hashes.into(),
         wrap_key,
+        client_wrap_key,
         mode,
         generation: config.generation,
         salt: std::sync::Arc::from(config.salt.as_str()),
         local_port: local_port.clone(),
-        device_id: std::sync::Arc::from(config.device_id.as_str()),
         password: std::sync::Arc::from(config.password.as_str()),
-        workers,
+        workers: params_workers,
+        configured_workers: workers,
     });
 
-    let repair = RepairState::new(workers);
-    let (config_tx, _config_rx) = tokio::sync::mpsc::channel::<String>(32);
-    
+    let repair = RepairState::new(MAX_WORKERS);
+    let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
+    let config_events = events.clone();
+    let config_task = tokio::spawn(async move {
+        let mut last_config = None;
+        while let Some(config) = config_rx.recv().await {
+            if last_config.as_deref() == Some(config.as_str()) {
+                continue;
+            }
+            if let Some(value) = config.strip_prefix("TUNCONF:") {
+                dns::mark_tunnel_active();
+                let mut fields = value.splitn(3, ':');
+                let ip = fields.next().unwrap_or_default();
+                let dns_server = fields.next().unwrap_or_default();
+                push_log(format!("[КЛИЕНТ] Tunnel IP: {ip}/32 | DNS: {dns_server}"));
+            }
+            config_events.config(&config);
+            last_config = Some(config);
+        }
+    });
+
     let context = std::sync::Arc::new(GroupContext {
         params,
         auth,
@@ -310,11 +436,23 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
         repair,
         shutdown: std::sync::Arc::new(ShutdownCoordinator::new()),
         cancel: cancel.clone(),
+        scale_notify,
     });
 
-    run_groups(groups, context).await;
+    let groups_future = run_groups(context);
+    tokio::pin!(groups_future);
+    let groups_completed = tokio::select! {
+        _ = &mut groups_future => true,
+        _ = cancel.cancelled() => false,
+    };
+    cancel.cancel();
+    if !groups_completed {
+        groups_future.await;
+    }
     dispatcher.shutdown().await;
-    
+    config_task.abort();
+    let _ = config_task.await;
+
     Ok(())
 }
 
@@ -335,13 +473,24 @@ pub extern "C" fn csqtt_run(
     client_ids: *const c_char,
     obfs: *const c_char,
     turn_transport: *const c_char,
+    srtp_mode: *const c_char,
     generation: u64,
     salt: *const c_char,
     turn: *const c_char,
+    custom_turn_ips: *const c_char,
     port: *const c_char,
     allow_hash_redistribution: bool,
     validate_vk_hashes: bool,
     tun_uds: *const c_char,
+    domain_routing: bool,
+    exclude_ru_zones: bool,
+    template_domains: bool,
+    domain_whitelist: bool,
+    direct_domains: *const c_char,
+    ip_routing: bool,
+    ip_whitelist: bool,
+    direct_ips: *const c_char,
+    exact_workers: bool,
 ) -> c_int {
     let config = CsqttConfig {
         peer: unsafe { cstr_to_string(peer) },
@@ -357,13 +506,24 @@ pub extern "C" fn csqtt_run(
         client_ids: unsafe { cstr_to_string(client_ids) },
         obfs: unsafe { cstr_to_string(obfs) },
         turn_transport: unsafe { cstr_to_string(turn_transport) },
+        srtp_mode: unsafe { cstr_to_string(srtp_mode) },
         generation,
         salt: unsafe { cstr_to_string(salt) },
         turn: unsafe { cstr_to_string(turn) },
+        custom_turn_ips: unsafe { cstr_to_string(custom_turn_ips) },
         port: unsafe { cstr_to_string(port) },
         allow_hash_redistribution,
         validate_vk_hashes,
         tun_uds: unsafe { cstr_to_string(tun_uds) },
+        domain_routing,
+        exclude_ru_zones,
+        template_domains,
+        domain_whitelist,
+        direct_domains: unsafe { cstr_to_string(direct_domains) },
+        ip_routing,
+        ip_whitelist,
+        direct_ips: unsafe { cstr_to_string(direct_ips) },
+        exact_workers,
     };
 
     push_log("[iOS] Starting client".to_string());
