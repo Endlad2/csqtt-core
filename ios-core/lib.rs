@@ -1,6 +1,7 @@
 // ios-core/lib.rs
 //
-// iOS static library crate root.
+// iOS static library crate root, synced with `rust-client` **2.5.1**.
+//
 // Модули подключаются напрямую из rust-client/ и shared/ через #[path].
 // Пути считаются ОТ ЭТОГО ФАЙЛА (ios-core/lib.rs):
 //   ../rust-client/*.rs  ->  csqtt-core/rust-client/*.rs
@@ -79,17 +80,15 @@ mod worker;
 #[path = "../rust-client/wrap.rs"]
 mod wrap;
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
-use std::sync::Mutex;
-use std::collections::VecDeque;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 // ===== Логирование через C-ABI =====
 
-static LOG_BUFFER: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| {
-    Mutex::new(VecDeque::with_capacity(1024))
-});
+static LOG_BUFFER: LazyLock<Mutex<VecDeque<String>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(1024)));
 
 static LOG_CALLBACK: Mutex<Option<unsafe extern "C" fn(*const c_char)>> = Mutex::new(None);
 
@@ -109,7 +108,9 @@ pub extern "C" fn csqtt_get_logs() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn csqtt_free_logs(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe { drop(CString::from_raw(ptr)); }
+        unsafe {
+            drop(CString::from_raw(ptr));
+        }
     }
 }
 
@@ -123,7 +124,9 @@ pub fn push_log(line: String) {
     if let Ok(callback_guard) = LOG_CALLBACK.lock() {
         if let Some(cb) = *callback_guard {
             if let Ok(cstr) = CString::new(line.clone()) {
-                unsafe { cb(cstr.as_ptr()); }
+                unsafe {
+                    cb(cstr.as_ptr());
+                }
             }
         }
     }
@@ -143,7 +146,6 @@ pub struct CsqttConfig {
     pub password: String,
     pub listen: String,
     pub workers: i32,
-    pub device_id: String,
     pub vk_hash_mode: String,
     pub vk_auth_mode: String,
     pub captcha_mode: String,
@@ -157,7 +159,6 @@ pub struct CsqttConfig {
     pub turn: String,
     pub custom_turn_ips: String,
     pub port: String,
-    pub allow_hash_redistribution: bool,
     pub validate_vk_hashes: bool,
     pub tun_uds: String,
     pub domain_routing: bool,
@@ -172,12 +173,13 @@ pub struct CsqttConfig {
 }
 
 impl CsqttConfig {
+    /// Строит вектор CLI-аргументов, идентичный тому, что в `rust-client/main.rs`
+    /// 2.5.1 (без флагов, которые в iOS-ядре не имеют смысла — `--domains-file`,
+    /// `--runtime-threads`, `--device-id`, `--allow-hash-redistribution`).
     fn to_args_vec(&self) -> Vec<String> {
         let mut args = Vec::new();
         args.push(format!("--peer={}", self.peer));
         args.push(format!("--vk={}", self.vk));
-        // --password: после возврата флага в rust-client/main.rs пароль
-        // передаётся через CLI (приоритет над env CSQTT_PASSWORD).
         if !self.password.is_empty() {
             args.push(format!("--password={}", self.password));
         }
@@ -198,7 +200,7 @@ impl CsqttConfig {
         if !self.client_ids.is_empty() {
             args.push(format!("--client-ids={}", self.client_ids));
         }
-        if !self.obfs.is_empty() && self.obfs != "audio" {
+        if !self.obfs.is_empty() && self.obfs != "unified" {
             args.push(format!("--obfs={}", self.obfs));
         }
         if !self.turn_transport.is_empty() && self.turn_transport != "udp" {
@@ -255,15 +257,18 @@ impl CsqttConfig {
         if self.exact_workers {
             args.push("--exact-workers".to_string());
         }
-        // NB: --device-id и --allow-hash-redistribution в rust-client 2.5.0
-        // больше не существуют как CLI-флаги, поэтому в args не кладём.
         args
     }
 }
 
-// ===== Основная логика (скопирована из main.rs) =====
+// ===== Основная логика (зеркало main.rs 2.5.1) =====
 
 const MAX_WORKERS: usize = 100;
+/// В iOS-ядре нет `--runtime-threads`, поэтому дефолт совпадает с
+/// `runtime_worker_threads_with_limit(workers, 0, available)` из main.rs 2.5.1,
+/// но `available` фиксируем консервативно (iOS обычно даёт 4–6 perf-ядер).
+const IOS_DEFAULT_RUNTIME_THREADS: usize = 4;
+const STREAMS_PER_RUNTIME_WORKER: usize = 8;
 
 fn normalize_worker_count(requested: usize) -> usize {
     if requested <= 5 {
@@ -271,6 +276,26 @@ fn normalize_worker_count(requested: usize) -> usize {
     }
     requested.clamp(worker::WORKERS_PER_GROUP, MAX_WORKERS) / worker::WORKERS_PER_GROUP
         * worker::WORKERS_PER_GROUP
+}
+
+fn runtime_worker_threads(requested_workers: usize) -> usize {
+    normalize_worker_count(requested_workers)
+        .div_ceil(STREAMS_PER_RUNTIME_WORKER)
+        .clamp(1, IOS_DEFAULT_RUNTIME_THREADS)
+}
+
+/// 2.5.1: Auto-JS требует stdin-канал для `VK_JS_BOOTSTRAP` и `CredentialBroker`,
+/// которых в static lib нет. Явно отклоняем, чтобы не запускать сломанный путь.
+fn reject_auto_js(vk_hash_mode: &str, vk_auth_mode: &str) -> Result<(), anyhow::Error> {
+    let js_hash_mode = vk_hash_mode == "auto_js";
+    let js_auth_mode = vk_auth_mode == "auto_js";
+    if js_hash_mode || js_auth_mode {
+        anyhow::bail!(
+            "[iOS] Режим Auto JS (vk_hash_mode=auto_js или vk_auth_mode=auto_js) \
+             не поддерживается в статической библиотеке — используйте manual/vkcalls/legacy"
+        );
+    }
+    Ok(())
 }
 
 async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
@@ -288,10 +313,19 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     use turn_endpoint::TurnTransportMode;
     use turn_ip_pool::{TurnIpPool, parse_custom_turn_ips};
     use worker::{
-        GroupContext, PauseGate, RuntimeParams, WORKER_START_INTERVAL,
-        WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
+        GroupContext, PauseGate, RuntimeParams, WORKER_START_INTERVAL, WORKERS_PER_GROUP,
+        WorkerStartPacer, parse_hashes, run_groups,
     };
     use wrap::derive_wrap_key;
+
+    reject_auto_js(&config.vk_hash_mode, &config.vk_auth_mode)?;
+
+    if config.peer.is_empty() || config.vk.is_empty() {
+        anyhow::bail!("[iOS] Нужны peer и хеши VK");
+    }
+    if config.password.is_empty() {
+        anyhow::bail!("[iOS] Нужен пароль");
+    }
 
     let peer = crate::dns::resolve_socket(&config.peer).await?;
     let mode = ObfsMode::parse(&config.obfs)?;
@@ -301,10 +335,7 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     let client_wrap_key = wrap_key;
     let session_profile = profiles::random_profile(&config.fingerprint);
 
-    let hashes: Vec<_> = parse_hashes(&config.vk)
-        .into_iter()
-        .take(6)
-        .collect();
+    let hashes: Vec<_> = parse_hashes(&config.vk).into_iter().take(6).collect();
 
     if hashes.is_empty() {
         anyhow::bail!("[КЛИЕНТ] Нет хешей VK");
@@ -318,9 +349,11 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     let groups = workers.div_ceil(WORKERS_PER_GROUP);
     let cancel = CancellationToken::new();
     let captcha = CaptchaSolver::new(&config.captcha_mode, cancel.clone());
-    let events = Events::from_env();
+    // В iOS нет env-переменных; события отключены по умолчанию.
+    let events = Events::new(false);
 
-    let client_ids: Vec<_> = config.client_ids
+    let client_ids: Vec<_> = config
+        .client_ids
         .split(',')
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -340,6 +373,9 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     let pool = PacketPool::new(packet_pool_size(MAX_WORKERS));
 
     let tun_uds = (!config.tun_uds.is_empty()).then_some(config.tun_uds.clone());
+
+    // `template_domains` использует `include_str!("../domains.txt")` из sni.rs,
+    // поэтому domains.txt собирается в бинарник — файлового I/O не требуется.
     let mut direct_domains = crate::sni::parse_direct_domains(&config.direct_domains);
     direct_domains.truncate(1024);
     let ip_rules = crate::sni::parse_ip_rules(&config.direct_ips);
@@ -362,7 +398,8 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
         cancel.clone(),
         domain_routing,
         workers,
-    ).await?;
+    )
+    .await?;
 
     let local_port: std::sync::Arc<str> = std::sync::Arc::from(local_port);
 
@@ -397,6 +434,10 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
         configured_workers: workers,
     });
 
+    push_log(format!(
+        "[КЛИЕНТ] Воркеров: {workers} (групп: {groups}, по {WORKERS_PER_GROUP})"
+    ));
+
     let repair = RepairState::new(MAX_WORKERS);
     let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
     let config_events = events.clone();
@@ -429,6 +470,7 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
         config_tx,
         start_pacer: std::sync::Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
         credential_pacer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        // 2.5.1: Auto-JS полностью выпилен из iOS-ядра, ready_credential_tx=None.
         ready_credential_tx: None,
         server_stream_repair: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         config_sent: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -456,8 +498,88 @@ async fn run_client(config: CsqttConfig) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+// ===== C-ABI: проверка хешей =====
+
+/// Колбэк для валидации хешей VK. Вызывается один раз на каждый хеш
+/// (в том же порядке, что и во входной строке `vk`).
+///
+/// `status`:
+///   0 = valid, 1 = invalid, 2 = unavailable.
+/// `code` — STUN/error_code (для invalid), 0 иначе.
+/// `message` — валидная NUL-terminated C-строка (никогда не NULL).
+pub type CsqttHashCheckCallback =
+    unsafe extern "C" fn(hash: *const c_char, status: c_int, code: i64, message: *const c_char);
+
+/// Синхронно проверяет список VK-хешей и вызывает `callback` на каждый.
+/// Возвращает 0 при успешном проходе, отрицательное число при ошибке
+/// (например, runtime не удалось создать или хеши пусты).
+#[unsafe(no_mangle)]
+pub extern "C" fn csqtt_validate_vk_hashes(
+    vk: *const c_char,
+    fingerprint: *const c_char,
+    client_ids: *const c_char,
+    callback: Option<CsqttHashCheckCallback>,
+) -> c_int {
+    let Some(callback) = callback else {
+        push_log("[iOS] validate_vk_hashes: callback is NULL".to_string());
+        return -3;
+    };
+    let vk = unsafe { cstr_to_string(vk) };
+    let fingerprint = unsafe { cstr_to_string(fingerprint) };
+    let client_ids_raw = unsafe { cstr_to_string(client_ids) };
+
+    let hashes: Vec<_> = worker::parse_hashes(&vk).into_iter().take(6).collect();
+    if hashes.is_empty() {
+        push_log("[iOS] validate_vk_hashes: нет хешей".to_string());
+        return -2;
+    }
+    let client_ids: Vec<_> = client_ids_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(error) => {
+            push_log(format!("[iOS] validate_vk_hashes: runtime: {error}"));
+            return -1;
+        }
+    };
+
+    rt.block_on(async move {
+        let results =
+            auth::check_vk_hashes(&fingerprint, &client_ids, &hashes).await;
+        for (hash, result) in results {
+            let (status, code, message) = match result {
+                auth::VkHashCheck::Valid => (0i32, 0i64, String::new()),
+                auth::VkHashCheck::Invalid { code, message } => (1, code, message),
+                auth::VkHashCheck::Unavailable { message } => (2, 0, message),
+            };
+            let Ok(hash_c) = CString::new(hash) else {
+                continue;
+            };
+            let Ok(msg_c) = CString::new(message) else {
+                continue;
+            };
+            unsafe {
+                callback(hash_c.as_ptr(), status, code, msg_c.as_ptr());
+            }
+        }
+    });
+
+    0
+}
+
 // ===== C-ABI экспорт =====
 
+/// 2.5.1: 29 аргументов. Убраны `device_id` и `allow_hash_redistribution`
+/// (не существуют как CLI-флаги в `rust-client/main.rs` 2.5.1).
 #[unsafe(no_mangle)]
 pub extern "C" fn csqtt_run(
     peer: *const c_char,
@@ -465,7 +587,6 @@ pub extern "C" fn csqtt_run(
     password: *const c_char,
     listen: *const c_char,
     workers: c_int,
-    device_id: *const c_char,
     vk_hash_mode: *const c_char,
     vk_auth_mode: *const c_char,
     captcha_mode: *const c_char,
@@ -479,7 +600,6 @@ pub extern "C" fn csqtt_run(
     turn: *const c_char,
     custom_turn_ips: *const c_char,
     port: *const c_char,
-    allow_hash_redistribution: bool,
     validate_vk_hashes: bool,
     tun_uds: *const c_char,
     domain_routing: bool,
@@ -498,7 +618,6 @@ pub extern "C" fn csqtt_run(
         password: unsafe { cstr_to_string(password) },
         listen: unsafe { cstr_to_string(listen) },
         workers,
-        device_id: unsafe { cstr_to_string(device_id) },
         vk_hash_mode: unsafe { cstr_to_string(vk_hash_mode) },
         vk_auth_mode: unsafe { cstr_to_string(vk_auth_mode) },
         captcha_mode: unsafe { cstr_to_string(captcha_mode) },
@@ -512,7 +631,6 @@ pub extern "C" fn csqtt_run(
         turn: unsafe { cstr_to_string(turn) },
         custom_turn_ips: unsafe { cstr_to_string(custom_turn_ips) },
         port: unsafe { cstr_to_string(port) },
-        allow_hash_redistribution,
         validate_vk_hashes,
         tun_uds: unsafe { cstr_to_string(tun_uds) },
         domain_routing,
@@ -526,10 +644,11 @@ pub extern "C" fn csqtt_run(
         exact_workers,
     };
 
-    push_log("[iOS] Starting client".to_string());
+    push_log("[iOS] Starting client (csqtt-core 2.5.1)".to_string());
 
+    let runtime_threads = runtime_worker_threads(config.workers as usize);
     let rt = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(runtime_threads)
         .enable_all()
         .build()
     {

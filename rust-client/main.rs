@@ -119,6 +119,9 @@ struct Arguments {
     salt: String,
     #[arg(long, default_value = "")]
     tun_uds: String,
+    /// Password for the CSQTT connection. Priority over CSQTT_PASSWORD env var.
+    #[arg(long, default_value = "", allow_hyphen_values = true)]
+    password: String,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
     #[arg(long = "domain-routing", default_value_t = false)]
@@ -217,6 +220,15 @@ fn runtime_worker_threads_with_limit(
         .clamp(1, available)
 }
 
+/// Возвращает пароль: CLI `--password` имеет приоритет над `CSQTT_PASSWORD`.
+fn resolve_password(cli_value: &str) -> String {
+    if !cli_value.is_empty() {
+        cli_value.to_owned()
+    } else {
+        std::env::var("CSQTT_PASSWORD").unwrap_or_default()
+    }
+}
+
 async fn run(arguments: Arguments) -> Result<i32> {
     if arguments.validate_vk_hashes {
         run_vk_hash_validation(&arguments).await?;
@@ -236,9 +248,9 @@ async fn run(arguments: Arguments) -> Result<i32> {
     if arguments.peer.is_empty() || (!js_hash_mode && arguments.vk.is_empty()) {
         bail!("[КЛИЕНТ] Нужны -peer и хеши VK");
     }
-    let password = std::env::var("CSQTT_PASSWORD").unwrap_or_default();
+    let password = resolve_password(&arguments.password);
     if password.is_empty() {
-        bail!("[КЛИЕНТ] Нужен пароль в переменной CSQTT_PASSWORD");
+        bail!("[КЛИЕНТ] Нужен пароль: --password или CSQTT_PASSWORD");
     }
     let mut stdin = spawn_stdin_reader();
     let peer = resolve_peer(&arguments.peer).await?;
@@ -578,6 +590,7 @@ fn normalize_cli_argument(argument: String) -> String {
         "gen",
         "salt",
         "tun-uds",
+        "password",
         "validate-vk-hashes",
         "domain-routing",
         "exclude-ru-zones",
@@ -980,6 +993,43 @@ mod worker_count_tests {
     }
 
     #[test]
+    fn password_flag_is_accepted_from_cli() {
+        let arguments = Arguments::try_parse_from([
+            "csqtt-client",
+            "--peer",
+            "127.0.0.1:9000",
+            "--password",
+            "secret",
+        ])
+        .unwrap();
+        assert_eq!(arguments.password, "secret");
+    }
+
+    #[test]
+    fn password_flag_accepts_hyphenated_values() {
+        let arguments = Arguments::try_parse_from([
+            "csqtt-client",
+            "--peer",
+            "127.0.0.1:9000",
+            "--password=-secret-value",
+        ])
+        .unwrap();
+        assert_eq!(arguments.password, "-secret-value");
+    }
+
+    #[test]
+    fn single_dash_password_is_normalized() {
+        assert_eq!(
+            normalize_cli_argument("-password".to_owned()),
+            "--password"
+        );
+        assert_eq!(
+            normalize_cli_argument("-password=secret".to_owned()),
+            "--password=secret"
+        );
+    }
+
+    #[test]
     fn removed_identity_flags_are_not_normalized_or_accepted() {
         assert_eq!(
             normalize_cli_argument("-client-id".to_owned()),
@@ -989,17 +1039,23 @@ mod worker_count_tests {
             normalize_cli_argument("-device-id".to_owned()),
             "-device-id"
         );
-        assert_eq!(normalize_cli_argument("-password".to_owned()), "-password");
         assert!(
             Arguments::try_parse_from([
                 "csqtt-client",
                 "--peer",
                 "127.0.0.1:9000",
-                "--password",
-                "secret",
+                "--device-id",
+                "abc",
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn resolve_password_prefers_cli_over_env() {
+        // Pure logic check without touching real env vars:
+        assert_eq!(resolve_password("cli-secret"), "cli-secret");
+        assert_eq!(resolve_password(""), std::env::var("CSQTT_PASSWORD").unwrap_or_default());
     }
 
     #[test]
