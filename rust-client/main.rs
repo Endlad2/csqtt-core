@@ -95,10 +95,6 @@ struct Arguments {
     vk_hash_mode: String,
     #[arg(long, default_value = "")]
     peer: String,
-    // Пароль подключения. Приоритет над env CSQTT_PASSWORD, чтобы iOS-обёртка
-    // (csqtt-core/ios-core) могла передавать пароль через --password=...
-    #[arg(long, default_value = "", allow_hyphen_values = true)]
-    password: String,
     #[arg(short = 'n', long, default_value_t = 18)]
     workers: usize,
     #[arg(long, default_value_t = 0)]
@@ -240,15 +236,9 @@ async fn run(arguments: Arguments) -> Result<i32> {
     if arguments.peer.is_empty() || (!js_hash_mode && arguments.vk.is_empty()) {
         bail!("[КЛИЕНТ] Нужны -peer и хеши VK");
     }
-    // Пароль берётся из --password (iOS-обёртка передаёт сюда), а если не задан —
-    // fallback на env CSQTT_PASSWORD (для CLI-сборок без флага).
-    let password = if !arguments.password.is_empty() {
-        arguments.password.clone()
-    } else {
-        std::env::var("CSQTT_PASSWORD").unwrap_or_default()
-    };
+    let password = std::env::var("CSQTT_PASSWORD").unwrap_or_default();
     if password.is_empty() {
-        bail!("[КЛИЕНТ] Нужен пароль в --password или переменной CSQTT_PASSWORD");
+        bail!("[КЛИЕНТ] Нужен пароль в переменной CSQTT_PASSWORD");
     }
     let mut stdin = spawn_stdin_reader();
     let peer = resolve_peer(&arguments.peer).await?;
@@ -578,7 +568,6 @@ fn normalize_cli_argument(argument: String) -> String {
         "vk",
         "vk-hash-mode",
         "peer",
-        "password",
         "client-ids",
         "vk-auth-mode",
         "captcha-mode",
@@ -1000,11 +989,7 @@ mod worker_count_tests {
             normalize_cli_argument("-device-id".to_owned()),
             "-device-id"
         );
-        // --password вернули обратно; значит -password должен нормализоваться в --password
-        assert_eq!(
-            normalize_cli_argument("-password".to_owned()),
-            "--password"
-        );
+        assert_eq!(normalize_cli_argument("-password".to_owned()), "-password");
         assert!(
             Arguments::try_parse_from([
                 "csqtt-client",
@@ -1013,7 +998,7 @@ mod worker_count_tests {
                 "--password",
                 "secret",
             ])
-            .is_ok()
+            .is_err()
         );
     }
 
@@ -1028,52 +1013,6 @@ mod worker_count_tests {
         ])
         .unwrap();
         assert_eq!(arguments.vk, "-Wabc,-Wdef");
-    }
-
-    #[test]
-    fn password_flag_parses_without_env() {
-        // --password должен работать без env CSQTT_PASSWORD
-        let arguments = Arguments::try_parse_from([
-            "csqtt-client",
-            "--peer",
-            "127.0.0.1:9000",
-            "--vk",
-            "abc",
-            "--password",
-            "s3cret-p@ss",
-        ])
-        .unwrap();
-        assert_eq!(arguments.password, "s3cret-p@ss");
-    }
-
-    #[test]
-    fn password_flag_accepts_value_with_hyphen_prefix() {
-        // allow_hyphen_values — иначе "-secret" clap воспримет как флаг
-        let arguments = Arguments::try_parse_from([
-            "csqtt-client",
-            "--peer",
-            "127.0.0.1:9000",
-            "--vk",
-            "abc",
-            "--password",
-            "-secret-with-hyphens",
-        ])
-        .unwrap();
-        assert_eq!(arguments.password, "-secret-with-hyphens");
-    }
-
-    #[test]
-    fn password_falls_back_to_env_when_flag_is_empty() {
-        // Пустой --password => используем env
-        let arguments = Arguments::try_parse_from([
-            "csqtt-client",
-            "--peer",
-            "127.0.0.1:9000",
-            "--vk",
-            "abc",
-        ])
-        .unwrap();
-        assert_eq!(arguments.password, "");
     }
 
     #[tokio::test]
